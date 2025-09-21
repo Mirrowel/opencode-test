@@ -9,16 +9,69 @@ on:
     types: [created]
 
 jobs:
-  opencode:
+  opencode-automatic:
+    if: github.event_name == 'issues' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Inject Custom Config (For Proxy Support)
+        run: |
+          mkdir -p ~/.config/opencode
+          # Build and write opencode.json with secrets
+          CONFIG='{
+            "$schema": "https://opencode.ai/config.json",
+            "providers": {
+              "llm-proxy": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Proxy",
+                "options": {
+                  "baseURL": "${{ secrets.PROXY_BASE_URL }}",
+                  "apiKey": "${{ secrets.PROXY_API_KEY }}",
+                  "headers": {
+                    "User-Agent": "OpenCode/1.0",
+                    "X-Custom-Header": "your-value"
+                  }
+                },
+                "models": {
+                  "gemini/gemini-2.5-pro": {
+                    "name": "Gemini 2.5 pro via Proxy"
+                  }
+                }
+              }
+            },
+            "model": "llm-proxy/gemini/gemini-2.5-pro",
+            "autoupdate": true
+          }'
+          echo "$CONFIG" > ~/.config/opencode/opencode.json
+
+      - name: Install OpenCode
+        run: npm install -g opencode-ai
+
+      - name: Run OpenCode Autonomously
+        run: |
+          if [[ "${{ github.event_name }}" == "issues" ]]; then
+            opencode --non-interactive "Analyze this new issue #${{ github.event.issue.number }}: ${{ github.event.issue.title }}. ${{ github.event.issue.body }}. Provide a response with analysis and next steps."
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            opencode --non-interactive "Review this new pull request #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}. ${{ github.event.pull_request.body }}. Provide detailed feedback and suggestions."
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  opencode-comment:
     if: |
-      github.event_name == 'issues' ||
-      github.event_name == 'pull_request' ||
-      (github.event_name == 'issue_comment' && (
+      github.event_name == 'issue_comment' && (
         contains(github.event.comment.body, ' /oc') ||
         startsWith(github.event.comment.body, '/oc') ||
         contains(github.event.comment.body, ' /opencode') ||
         startsWith(github.event.comment.body, '/opencode')
-      ))
+      )
     runs-on: ubuntu-latest
     permissions:
       contents: write
