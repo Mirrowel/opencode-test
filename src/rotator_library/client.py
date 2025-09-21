@@ -167,7 +167,6 @@ class RotatingClient:
     def _get_provider_instance(self, provider_name: str):
         """
         Lazily initializes and returns a provider instance.
-        Ensures that the model cache is ready before initializing a provider.
         """
         if provider_name not in self._provider_instances:
             if provider_name in self._provider_plugins:
