@@ -64,24 +64,7 @@ class RotatingClient:
         self.http_client = httpx.AsyncClient()
         self.all_providers = AllProviders()
         self.cooldown_manager = CooldownManager()
-        self._model_list_cache_task = None
-        self._model_list_cache_ready = asyncio.Event()
-
-    async def _populate_model_cache(self):
-        """Asynchronously populates the model list cache."""
-        try:
-            tasks = [self.get_available_models(provider) for provider in self.api_keys.keys()]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for provider, result in zip(self.api_keys.keys(), results):
-                if isinstance(result, Exception):
-                    lib_logger.error(f"Failed to get models for provider {provider}: {result}")
-                    self._model_list_cache[provider] = []
-                else:
-                    self._model_list_cache[provider] = result
-        finally:
-            self._model_list_cache_ready.set()
-            lib_logger.info("Model list cache population finished.")
-
+        self._provider_locks: Dict[str, asyncio.Lock] = {}
 
     def _sanitize_litellm_log(self, log_data: dict) -> dict:
         """
@@ -161,19 +144,8 @@ class RotatingClient:
         """Close the HTTP client to prevent resource leaks."""
         if hasattr(self, 'http_client') and self.http_client:
             await self.http_client.aclose()
-        # Cancel the cache task if it's running
-        if self._model_list_cache_task and not self._model_list_cache_task.done():
-            self._model_list_cache_task.cancel()
-            try:
-                await self._model_list_cache_task
-            except asyncio.CancelledError:
-                lib_logger.info("Model cache population task cancelled.")
 
-    def start_model_cache_population(self):
-        """Starts the background task to populate the model cache."""
-        if self._model_list_cache_task is None:
-            self._model_list_cache_task = asyncio.create_task(self._populate_model_cache())
-            lib_logger.info("Started background task to populate model cache.")
+
 
     def _convert_model_params(self, **kwargs) -> Dict[str, Any]:
         """
@@ -197,15 +169,6 @@ class RotatingClient:
         Lazily initializes and returns a provider instance.
         Ensures that the model cache is ready before initializing a provider.
         """
-        if not self._model_list_cache_ready.is_set():
-            # This should ideally not be hit if the public methods await the cache.
-            # However, it's a safeguard against race conditions.
-            lib_logger.warning(f"Provider instance for {provider_name} requested before model cache was ready.")
-            # In a synchronous context, we can't await. The design relies on
-            # the public methods to handle the await logic.
-            # Returning None might be safer than blocking.
-            return None
-
         if provider_name not in self._provider_instances:
             if provider_name in self._provider_plugins:
                 self._provider_instances[provider_name] = self._provider_plugins[provider_name]()
@@ -822,46 +785,53 @@ class RotatingClient:
 
     async def get_available_models(self, provider: str) -> List[str]:
         """Returns a list of available models for a specific provider, with caching."""
-        lib_logger.info(f"Getting available models for provider: {provider}")
-        if provider in self._model_list_cache:
-            lib_logger.debug(f"Returning cached models for provider: {provider}")
-            return self._model_list_cache[provider]
+        await self._ensure_provider_models_loaded(provider)
+        return self._model_list_cache.get(provider, [])
 
-        keys_for_provider = self.api_keys.get(provider)
-        if not keys_for_provider:
-            lib_logger.warning(f"No API key for provider: {provider}")
-            return []
+    async def _ensure_provider_models_loaded(self, provider: str):
+        """Ensures that the models for a given provider are loaded, with locking to prevent redundant fetches."""
+        if provider not in self._provider_locks:
+            self._provider_locks[provider] = asyncio.Lock()
 
-        # Create a copy and shuffle it to randomize the starting key
-        shuffled_keys = list(keys_for_provider)
-        random.shuffle(shuffled_keys)
+        async with self._provider_locks[provider]:
+            if self._model_list_cache.get(provider) is not None:
+                lib_logger.debug(f"Models for provider {provider} are already cached.")
+                return
 
-        provider_instance = self._get_provider_instance(provider)
-        if provider_instance:
-            for api_key in shuffled_keys:
-                try:
-                    lib_logger.debug(f"Attempting to get models for {provider} with key ...{api_key[-4:]}")
-                    models = await provider_instance.get_models(api_key, self.http_client)
-                    lib_logger.info(f"Got {len(models)} models for provider: {provider}")
-                    self._model_list_cache[provider] = models
-                    return models
-                except Exception as e:
-                    classified_error = classify_error(e)
-                    lib_logger.debug(f"Failed to get models for provider {provider} with key ...{api_key[-4:]}: {classified_error.error_type}. Trying next key.")
-                    continue # Try the next key
-        
-        lib_logger.error(f"Failed to get models for provider {provider} after trying all keys.")
-        return []
+            lib_logger.info(f"Fetching available models for provider: {provider}")
+            keys_for_provider = self.api_keys.get(provider)
+            if not keys_for_provider:
+                lib_logger.warning(f"No API key for provider: {provider}")
+                self._model_list_cache[provider] = []
+                return
+
+            shuffled_keys = list(keys_for_provider)
+            random.shuffle(shuffled_keys)
+
+            provider_instance = self._get_provider_instance(provider)
+            if provider_instance:
+                for api_key in shuffled_keys:
+                    try:
+                        lib_logger.debug(f"Attempting to get models for {provider} with key ...{api_key[-4:]}")
+                        models = await provider_instance.get_models(api_key, self.http_client)
+                        lib_logger.info(f"Got {len(models)} models for provider: {provider}")
+                        self._model_list_cache[provider] = models
+                        return
+                    except Exception as e:
+                        classified_error = classify_error(e)
+                        lib_logger.debug(f"Failed to get models for provider {provider} with key ...{api_key[-4:]}: {classified_error.error_type}. Trying next key.")
+                        continue
+            
+            lib_logger.error(f"Failed to get models for provider {provider} after trying all keys.")
+            self._model_list_cache[provider] = []
 
     async def get_all_available_models(self, grouped: bool = True) -> Union[Dict[str, List[str]], List[str]]:
         """
         Returns a list of all available models, either grouped by provider or as a flat list.
-        Waits for the cache to be ready before returning data.
+        Fetches models on-demand if they are not already cached.
         """
-        if not self._model_list_cache_ready.is_set():
-            lib_logger.info("Waiting for model list cache to be populated...")
-            await self._model_list_cache_ready.wait()
-            lib_logger.info("Model list cache is ready.")
+        tasks = [self._ensure_provider_models_loaded(provider) for provider in self.api_keys.keys()]
+        await asyncio.gather(*tasks)
 
         if grouped:
             return self._model_list_cache
