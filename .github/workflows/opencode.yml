@@ -38,6 +38,11 @@ jobs:
                     "User-Agent": "OpenCode/1.0",
                     "X-Custom-Header": "your-value"
                   }
+                },
+                "models": {
+                  "${{ secrets.OPENCODE_MODEL }}": {
+                    "name": "Custom Model"
+                  }
                 }
               }
             },
