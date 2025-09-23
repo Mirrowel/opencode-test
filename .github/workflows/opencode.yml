@@ -7,16 +7,22 @@ on:
 jobs:
   opencode:
     if: |
+      (
       contains(github.event.comment.body, ' /oc') ||
       startsWith(github.event.comment.body, '/oc') ||
       contains(github.event.comment.body, ' /opencode') ||
       startsWith(github.event.comment.body, '/opencode')
+      ) && (
+        github.event.comment.author_association == 'OWNER' ||
+        github.event.comment.author_association == 'MEMBER' ||
+        github.event.comment.author_association == 'COLLABORATOR'
+      )
     runs-on: ubuntu-latest
     permissions:
       contents: write
       issues: write
       pull-requests: write
-      id-token: write
+      # id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -49,12 +55,18 @@ jobs:
             "autoupdate": true
           }'
           echo "$CONFIG" > ~/.config/opencode/opencode.json
-
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
       - name: Run opencode
         uses: sst/opencode/github@latest
         env:
