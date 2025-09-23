@@ -60,5 +60,5 @@ jobs:
         env:
           OPENCODE_API_KEY: ${{ secrets.PROXY_API_KEY }}
         with:
-          model: ${{ secrets.OPENCODE_MODEL }}
+          model: llm-proxy/${{ secrets.OPENCODE_MODEL }}
           share: true
