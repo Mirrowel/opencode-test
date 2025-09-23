@@ -38,15 +38,9 @@ jobs:
                     "User-Agent": "OpenCode/1.0",
                     "X-Custom-Header": "your-value"
                   }
-                },
-                "models": {
-                  "gemini/gemini-2.5-pro": {
-                    "name": "Gemini 2.5 pro via Proxy"
-                  }
                 }
               }
             },
-            "model": "gemini/gemini-2.5-pro",
             "autoupdate": true
           }'
           echo "$CONFIG" > ~/.config/opencode/opencode.json
@@ -61,5 +55,5 @@ jobs:
         env:
           OPENCODE_API_KEY: ${{ secrets.PROXY_API_KEY }}
         with:
-          model: llm-proxy/gemini/gemini-2.5-pro
+          model: ${{ secrets.OPENCODE_MODEL }}
           share: true
