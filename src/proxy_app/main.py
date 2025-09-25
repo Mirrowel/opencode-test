@@ -253,18 +253,20 @@ async def streaming_response_wrapper(
                             if value:
                                 final_message["content"] += value
                         
-                        elif key == "tool_calls":
-                            for tc_chunk in value:
-                                index = tc_chunk["index"]
-                                if index not in aggregated_tool_calls:
-                                    aggregated_tool_calls[index] = {"id": None, "type": "function", "function": {"name": "", "arguments": ""}}
-                                if tc_chunk.get("id"):
-                                    aggregated_tool_calls[index]["id"] = tc_chunk["id"]
-                                if "function" in tc_chunk:
-                                    if "name" in tc_chunk["function"]:
-                                        aggregated_tool_calls[index]["function"]["name"] += tc_chunk["function"]["name"]
-                                    if "arguments" in tc_chunk["function"]:
-                                        aggregated_tool_calls[index]["function"]["arguments"] += tc_chunk["function"]["arguments"]
+elif key == "tool_calls":
+                         for tc_chunk in value:
+                             index = tc_chunk["index"]
+                             if index not in aggregated_tool_calls:
+                                 aggregated_tool_calls[index] = {"id": None, "type": "function", "function": {"name": "", "arguments": ""}}
+                             if tc_chunk.get("id"):
+                                 aggregated_tool_calls[index]["id"] = tc_chunk["id"]
+if "function" in tc_chunk:
+                                     if "name" in tc_chunk["function"]:
+                                         name_val = tc_chunk["function"]["name"]
+                                         if name_val is not None:
+                                             aggregated_tool_calls[index]["function"]["name"] += name_val
+                                     if "arguments" in tc_chunk["function"]:
+                                         aggregated_tool_calls[index]["function"]["arguments"] += tc_chunk["function"]["arguments"]
                         
                         elif key == "function_call":
                             if "function_call" not in final_message:
