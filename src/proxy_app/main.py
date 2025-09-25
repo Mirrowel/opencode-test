@@ -261,10 +261,20 @@ async def streaming_response_wrapper(
                                 if tc_chunk.get("id"):
                                     aggregated_tool_calls[index]["id"] = tc_chunk["id"]
                                 if "function" in tc_chunk:
-                                    if "name" in tc_chunk["function"]:
-                                        aggregated_tool_calls[index]["function"]["name"] += tc_chunk["function"]["name"]
-                                    if "arguments" in tc_chunk["function"]:
-                                        aggregated_tool_calls[index]["function"]["arguments"] += tc_chunk["function"]["arguments"]
+                                    if "name" in tc_chunk["function"] and tc_chunk["function"]["name"] is not None:
+                                        name_value = tc_chunk["function"]["name"]
+                                        if isinstance(name_value, str):
+                                            aggregated_tool_calls[index]["function"]["name"] += name_value
+                                        else:
+                                            # Handle case where name is not a string
+                                            aggregated_tool_calls[index]["function"]["name"] = str(name_value)
+                                    if "arguments" in tc_chunk["function"] and tc_chunk["function"]["arguments"] is not None:
+                                        args_value = tc_chunk["function"]["arguments"]
+                                        if isinstance(args_value, str):
+                                            aggregated_tool_calls[index]["function"]["arguments"] += args_value
+                                        else:
+                                            # Handle case where arguments is not a string
+                                            aggregated_tool_calls[index]["function"]["arguments"] = str(args_value)
                         
                         elif key == "function_call":
                             if "function_call" not in final_message:
