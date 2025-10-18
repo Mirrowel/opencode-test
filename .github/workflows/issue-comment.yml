@@ -67,7 +67,7 @@ jobs:
       
       # FIX: Create the directory that opencode expects
       - name: Ensure opencode directory exists
-        run: mkdir -p ~/.local/share/opencode
+        run: mkdir -p /home/runner/.local/share/opencode/project
 
       - name: Analyze issue and suggest resolution
         env:
@@ -83,6 +83,10 @@ jobs:
               "webfetch": "deny"
             }
         run: |
+          # This command MUST run before opencode to prevent the ENOENT error
+          mkdir -p /home/runner/.local/share/opencode
+
+          # This command will now run successfully
           opencode run --share --print-logs --log-level INFO -m llm-proxy/${{ secrets.OPENCODE_MODEL }} "A new issue has been created:
 
           Issue number:
