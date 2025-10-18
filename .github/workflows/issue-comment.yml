@@ -93,13 +93,23 @@ jobs:
 
       # NEW STEP: Fetch issue details so they are available for both triggers
       - name: Fetch Issue Details
+        id: issue_details # Giving the step an ID can be useful
         env:
           GH_TOKEN: ${{ steps.generate_token.outputs.token }}
         run: |
+          # Fetch the full JSON data
           issue_data=$(gh issue view ${{ env.ISSUE_NUMBER }} --json title,body)
-          echo "ISSUE_TITLE=$(echo "$issue_data" | jq -r .title)" >> $GITHUB_ENV
-          echo "ISSUE_BODY=$(echo "$issue_data" | jq -r .body)" >> $GITHUB_ENV
           
+          # Extract title (usually single-line, but this is safer)
+          issue_title=$(echo "$issue_data" | jq -r .title)
+          echo "ISSUE_TITLE=$issue_title" >> $GITHUB_ENV
+
+          # Extract body and use the multi-line heredoc syntax for GITHUB_ENV
+          issue_body=$(echo "$issue_data" | jq -r .body)
+          echo "ISSUE_BODY<<EOF" >> $GITHUB_ENV
+          echo "$issue_body" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
       - name: Analyze issue and suggest resolution
         env:
           OPENCODE_API_KEY: ${{ secrets.PROXY_API_KEY }}

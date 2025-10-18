@@ -3,6 +3,12 @@ name: PR Review
 on:
   pull_request_target:
     types: [opened]
+  workflow_dispatch: # Allow manual runs
+    inputs:
+      prNumber:
+        description: 'The number of the PR to review manually'
+        required: true
+        type: string
 
 jobs:
   review-pr:
@@ -10,10 +16,43 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+
+    env:
+      # Universally define the PR number for both triggers
+      PR_NUMBER: ${{ github.event.pull_request.number || inputs.prNumber }}
+
     steps:
-      - name: Checkout repository
+
+      - name: Generate GitHub App Token
+        id: generate_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
+
+      # STEP 1: Fetch only the metadata needed for checkout.
+      - name: Fetch PR Metadata
+        id: pr_meta
+        env:
+          GH_TOKEN: ${{ steps.generate_token.outputs.token }}
+        run: |
+          pr_json=$(gh pr view ${{ env.PR_NUMBER }} --json headRefName,headRepository,title,body,headSha)
+          
+          # Set outputs for the checkout step
+          echo "repo_full_name=$(echo "$pr_json" | jq -r .headRepository.nameWithOwner)" >> $GITHUB_OUTPUT
+          echo "ref_name=$(echo "$pr_json" | jq -r .headRefName)" >> $GITHUB_OUTPUT
+
+          # Set environment variables for the prompt step
+          echo "PR_TITLE=$(echo "$pr_json" | jq -r .title)" >> $GITHUB_ENV
+          echo "PR_BODY=$(echo "$pr_json" | jq -r .body)" >> $GITHUB_ENV
+          echo "PR_HEAD_SHA=$(echo "$pr_json" | jq -r .headSha)" >> $GITHUB_ENV
+
+      # STEP 2: Use the fetched metadata to perform a safe checkout.
+      - name: Checkout PR head
         uses: actions/checkout@v4
         with:
+          repository: ${{ steps.pr_meta.outputs.repo_full_name }}
+          ref: ${{ steps.pr_meta.outputs.ref_name }}
           fetch-depth: 0
 
       - name: Inject Custom Config (For Proxy Support)
@@ -68,6 +107,8 @@ jobs:
         # FIX: Create the directory that opencode expects
       - name: Ensure opencode directory exists
         run: mkdir -p /home/runner/.local/share/opencode/project
+
+
       - name: Review PR comprehensively
         env:
           OPENCODE_API_KEY: ${{ secrets.PROXY_API_KEY }}
@@ -81,16 +122,19 @@ jobs:
               "webfetch": "deny"
             }
         run: |
-          opencode run --share -m llm-proxy/${{ secrets.OPENCODE_MODEL }} "You are a meticulous and collaborative code reviewer. Your primary objective is to help improve the code quality by providing constructive and actionable feedback.
+          # Use a heredoc (<<EOF) to pass the prompt safely via stdin.
+          # The "-" tells the opencode command to read the prompt from stdin.
+          opencode run --share -m llm-proxy/${{ secrets.OPENCODE_MODEL }} - <<EOF
+          You are a meticulous and collaborative code reviewer. Your primary objective is to help improve the code quality by providing constructive and actionable feedback.
 
-          A new pull request has been submitted: '${{ github.event.pull_request.title }}'
+          A new pull request has been submitted: '${{ env.PR_TITLE }}'
 
           <pr-number>
-          ${{ github.event.pull_request.number }}
+          ${{ env.PR_NUMBER }}
           </pr-number>
 
           <pr-description>
-          ${{ github.event.pull_request.body }}
+          ${{ env.PR_BODY }}
           </pr-description>
 
           Conduct a comprehensive review of this pull request by performing the following tasks:
@@ -100,14 +144,14 @@ jobs:
           4.  **Check for Completeness:** Verify that all related tasks are resolved, documentation is updated, and there are no regressions.
 
           For specific feedback, post comments on the exact lines of code using the `gh api` command. Provide clear explanations and use suggestion blocks for code improvements where applicable. Here is the command template:
-          \`\`\`
+          \\\
           gh api \
             --method POST \
             -H \"Accept: application/vnd.github+json\" \
             -H \"X-GitHub-Api-Version: 2022-11-28\" \
-            /repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments \
-            -f 'body=[Your insightful comment and suggestion]' -f 'commit_id=${{ github.event.pull_request.head.sha }}' -f 'path=[path-to-file]' -F \"line=[line]\" -f 'side=RIGHT'
-          \`\`\`
+            /repos/${{ github.repository }}/pulls/${{ env.PR_NUMBER }}/comments \
+            -f 'body=[Your insightful comment and suggestion]' -f 'commit_id=${{ env.PR_HEAD_SHA }}' -f 'path=[path-to-file]' -F \"line=[line]\" -f 'side=RIGHT'
+          \\\
 
           After posting all line-specific comments, leave a single summary comment on the PR using `gh pr comment`. This summary should follow this structure:
 
@@ -115,4 +159,5 @@ jobs:
           **Key Suggestions:** A bulleted list of your most important feedback points.
           **Nitpicks and Minor Points:** A separate section for smaller, optional suggestions.
 
-          If the PR is excellent and requires no changes, provide a positive and encouraging summary. Make it clear that your comments are suggestions for the author to consider."
+          If the PR is excellent and requires no changes, provide a positive and encouraging summary. Make it clear that your comments are suggestions for the author to consider.
+          EOF
