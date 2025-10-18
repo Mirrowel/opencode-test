@@ -65,6 +65,9 @@ jobs:
       - name: Install opencode
         run: curl -fsSL https://opencode.ai/install | bash
 
+        # FIX: Create the directory that opencode expects
+      - name: Ensure opencode directory exists
+        run: mkdir -p /home/runner/.local/share/opencode/project
       - name: Review PR comprehensively
         env:
           OPENCODE_API_KEY: ${{ secrets.PROXY_API_KEY }}
@@ -73,13 +76,14 @@ jobs:
             {
               "bash": {
                 "gh*": "allow",
-                "git*": "allow",
-                "*": "allow"
+                "git*": "allow"
               },
               "webfetch": "deny"
             }
         run: |
-          opencode run -m llm-proxy/${{ secrets.OPENCODE_MODEL }} "A new pull request has been created: '${{ github.event.pull_request.title }}'
+          opencode run --share -m llm-proxy/${{ secrets.OPENCODE_MODEL }} "You are a meticulous and collaborative code reviewer. Your primary objective is to help improve the code quality by providing constructive and actionable feedback.
+
+          A new pull request has been submitted: '${{ github.event.pull_request.title }}'
 
           <pr-number>
           ${{ github.event.pull_request.number }}
@@ -89,20 +93,26 @@ jobs:
           ${{ github.event.pull_request.body }}
           </pr-description>
 
-          Thoroughly review the implementation in this pull request. Perform these tasks:
-          1. Fetch the pull request branch and inspect all code changes in context, including linked commits and related files. Use git and gh commands as needed.
-          2. Evaluate if the implementation correctly addresses the stated goals and any linked issues (inspect referenced issues via gh, validating requirements and acceptance criteria).
-          3. Assess code quality, architecture alignment, security implications, performance considerations, test coverage, and documentation updates. Identify missing tests or docs when relevant.
-          4. Verify completeness: ensure all referenced issues or tasks are resolved, new edge cases are handled, and regressions are avoided. Note any TODOs or missing follow-up.
+          Conduct a comprehensive review of this pull request by performing the following tasks:
+          1.  **Analyze the Changes:** Fetch the pull request branch and carefully inspect all code modifications in their full context.
+          2.  **Verify the Implementation:** Ensure that the implementation correctly addresses the goals stated in the PR description and any linked issues.
+          3.  **Assess Code Quality:** Evaluate the code for quality, adherence to architectural patterns, potential security vulnerabilities, performance implications, and test coverage.
+          4.  **Check for Completeness:** Verify that all related tasks are resolved, documentation is updated, and there are no regressions.
 
-          When you identify a concrete problem or improvement, create a review comment using the gh CLI on the exact line whenever possible. Provide actionable feedback and suggested fixes inside suggestion code blocks when appropriate. Use this command template for each comment:
+          For specific feedback, post comments on the exact lines of code using the `gh api` command. Provide clear explanations and use suggestion blocks for code improvements where applicable. Here is the command template:
           \`\`\`
           gh api \
             --method POST \
             -H \"Accept: application/vnd.github+json\" \
             -H \"X-GitHub-Api-Version: 2022-11-28\" \
             /repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments \
-            -f 'body=[summary of issue]' -f 'commit_id=${{ github.event.pull_request.head.sha }}' -f 'path=[path-to-file]' -F \"line=[line]\" -f 'side=RIGHT'
+            -f 'body=[Your insightful comment and suggestion]' -f 'commit_id=${{ github.event.pull_request.head.sha }}' -f 'path=[path-to-file]' -F \"line=[line]\" -f 'side=RIGHT'
           \`\`\`
 
-          For broader feedback that cannot be placed on a specific line, leave a single summary comment using gh pr comment. Make it clear the comments are suggestions and humans can decide what to do. If everything looks good - post summary of your findings."
+          After posting all line-specific comments, leave a single summary comment on the PR using `gh pr comment`. This summary should follow this structure:
+
+          **Overall Assessment:** A brief, high-level summary of the pull request. (e.g., 'This PR looks solid and addresses the issue well, with a few minor suggestions for improvement.')
+          **Key Suggestions:** A bulleted list of your most important feedback points.
+          **Nitpicks and Minor Points:** A separate section for smaller, optional suggestions.
+
+          If the PR is excellent and requires no changes, provide a positive and encouraging summary. Make it clear that your comments are suggestions for the author to consider."
