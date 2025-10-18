@@ -79,7 +79,7 @@ jobs:
               "webfetch": "deny"
             }
         run: |
-          opencode run --share --print-logs --log-level debug -m llm-proxy/${{ secrets.OPENCODE_MODEL }} "A new issue has been created:
+          opencode run --share --print-logs --log-level DEBUG -m llm-proxy/${{ secrets.OPENCODE_MODEL }} "A new issue has been created:
 
           Issue number:
           ${{ github.event.issue.number }}
