@@ -8,14 +8,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import APIKeyHeader
 from dotenv import load_dotenv
-import logging
 import colorlog
 from pathlib import Path
 import sys
 import json
+import time
 from typing import AsyncGenerator, Any, List, Optional, Union
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import argparse
+import logging
+
+# --- Early Log Level Configuration ---
+# Set the log level for LiteLLM before it's imported to prevent startup spam.
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+
 import litellm
 
 
@@ -27,11 +33,24 @@ class EmbeddingRequest(BaseModel):
     dimensions: Optional[int] = None
     user: Optional[str] = None
 
+
+# --- Pydantic Models for Model Endpoints ---
+class ModelCard(BaseModel):
+    id: str
+    object: str = "model"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    owned_by: str = "Mirro-Proxy"
+
+class ModelList(BaseModel):
+    object: str = "list"
+    data: List[ModelCard]
+
 # --- Argument Parsing ---
 parser = argparse.ArgumentParser(description="API Key Proxy Server")
 parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the server to.")
 parser.add_argument("--port", type=int, default=8000, help="Port to run the server on.")
 parser.add_argument("--enable-request-logging", action="store_true", help="Enable request logging.")
+parser.add_argument("--add-credential", action="store_true", help="Launch the interactive tool to add a new OAuth credential.")
 args, _ = parser.parse_known_args()
 
 
@@ -39,8 +58,12 @@ args, _ = parser.parse_known_args()
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from rotator_library import RotatingClient, PROVIDER_PLUGINS
-from proxy_app.request_logger import log_request_response, log_request_to_console
+from rotator_library.credential_manager import CredentialManager
+from rotator_library.background_refresher import BackgroundRefresher
+from rotator_library.credential_tool import run_credential_tool
+from proxy_app.request_logger import log_request_to_console
 from proxy_app.batch_manager import EmbeddingBatcher
+from proxy_app.detailed_logger import DetailedLogger
 
 # --- Logging Configuration ---
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
@@ -111,27 +134,157 @@ PROXY_API_KEY = os.getenv("PROXY_API_KEY")
 if not PROXY_API_KEY:
     raise ValueError("PROXY_API_KEY environment variable not set.")
 
-# Load all provider API keys from environment variables
+# Discover API keys from environment variables
 api_keys = {}
 for key, value in os.environ.items():
-    # Exclude PROXY_API_KEY from being treated as a provider API key
-    if (key.endswith("_API_KEY") or "_API_KEY_" in key) and key != "PROXY_API_KEY":
-        parts = key.split("_API_KEY")
-        provider = parts[0].lower()
+    if "_API_KEY" in key and key != "PROXY_API_KEY":
+        provider = key.split("_API_KEY")[0].lower()
         if provider not in api_keys:
             api_keys[provider] = []
         api_keys[provider].append(value)
 
-if not api_keys:
-    raise ValueError("No provider API keys found in environment variables.")
+# Load model ignore lists from environment variables
+ignore_models = {}
+for key, value in os.environ.items():
+    if key.startswith("IGNORE_MODELS_"):
+        provider = key.replace("IGNORE_MODELS_", "").lower()
+        models_to_ignore = [model.strip() for model in value.split(',') if model.strip()]
+        ignore_models[provider] = models_to_ignore
+        logging.debug(f"Loaded ignore list for provider '{provider}': {models_to_ignore}")
+
+# Load model whitelist from environment variables
+whitelist_models = {}
+for key, value in os.environ.items():
+    if key.startswith("WHITELIST_MODELS_"):
+        provider = key.replace("WHITELIST_MODELS_", "").lower()
+        models_to_whitelist = [model.strip() for model in value.split(',') if model.strip()]
+        whitelist_models[provider] = models_to_whitelist
+        logging.debug(f"Loaded whitelist for provider '{provider}': {models_to_whitelist}")
 
 # --- Lifespan Management ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage the RotatingClient's lifecycle with the app's lifespan."""
-     # The client now uses the root logger configuration
-    client = RotatingClient(api_keys=api_keys, configure_logging=True)
-    client.start_model_cache_population()  # Start the background task
+    # [MODIFIED] Perform skippable OAuth initialization at startup
+    skip_oauth_init = os.getenv("SKIP_OAUTH_INIT_CHECK", "false").lower() == "true"
+
+    # The CredentialManager now handles all discovery, including .env overrides.
+    # We pass all environment variables to it for this purpose.
+    cred_manager = CredentialManager(os.environ)
+    oauth_credentials = cred_manager.discover_and_prepare()
+
+    if not api_keys and not oauth_credentials:
+        raise ValueError("No provider API keys or OAuth credentials found.")
+
+    if not skip_oauth_init and oauth_credentials:
+        logging.info("Starting OAuth credential validation and deduplication...")
+        processed_emails = {}  # email -> {provider: path}
+        credentials_to_initialize = {} # provider -> [paths]
+        final_oauth_credentials = {}
+
+        # --- Pass 1: Pre-initialization Scan & Deduplication ---
+        #logging.info("Pass 1: Scanning for existing metadata to find duplicates...")
+        for provider, paths in oauth_credentials.items():
+            if provider not in credentials_to_initialize:
+                credentials_to_initialize[provider] = []
+            for path in paths:
+                try:
+                    with open(path, 'r') as f:
+                        data = json.load(f)
+                    metadata = data.get("_proxy_metadata", {})
+                    email = metadata.get("email")
+
+                    if email:
+                        if email not in processed_emails:
+                            processed_emails[email] = {}
+                        
+                        if provider in processed_emails[email]:
+                            original_path = processed_emails[email][provider]
+                            logging.warning(f"Duplicate for '{email}' on '{provider}' found in pre-scan: '{Path(path).name}'. Original: '{Path(original_path).name}'. Skipping.")
+                            continue
+                        else:
+                            processed_emails[email][provider] = path
+                    
+                    credentials_to_initialize[provider].append(path)
+
+                except (FileNotFoundError, json.JSONDecodeError) as e:
+                    logging.warning(f"Could not pre-read metadata from '{path}': {e}. Will process during initialization.")
+                    credentials_to_initialize[provider].append(path)
+        
+        # --- Pass 2: Initialization of Filtered Credentials & Final Check ---
+        #logging.info("Pass 2: Initializing unique credentials and performing final check...")
+        for provider, paths in credentials_to_initialize.items():
+            if not paths: continue
+
+            provider_plugin_class = PROVIDER_PLUGINS.get(provider)
+            if not provider_plugin_class: continue
+            
+            provider_instance = provider_plugin_class()
+            
+            for path in paths:
+                try:
+                    await provider_instance.initialize_token(path)
+
+                    if not hasattr(provider_instance, 'get_user_info'):
+                        if provider not in final_oauth_credentials:
+                            final_oauth_credentials[provider] = []
+                        final_oauth_credentials[provider].append(path)
+                        continue
+
+                    user_info = await provider_instance.get_user_info(path)
+                    email = user_info.get("email")
+
+                    if not email:
+                        logging.warning(f"Could not retrieve email for '{path}'. Treating as unique.")
+                        if provider not in final_oauth_credentials:
+                            final_oauth_credentials[provider] = []
+                        final_oauth_credentials[provider].append(path)
+                        continue
+
+                    if email not in processed_emails:
+                        processed_emails[email] = {}
+                    
+                    if provider in processed_emails[email] and processed_emails[email][provider] != path:
+                        original_path = processed_emails[email][provider]
+                        logging.warning(f"Duplicate for '{email}' on '{provider}' found post-init: '{Path(path).name}'. Original: '{Path(original_path).name}'. Skipping.")
+                        continue
+                    else:
+                        processed_emails[email][provider] = path
+                        if provider not in final_oauth_credentials:
+                            final_oauth_credentials[provider] = []
+                        final_oauth_credentials[provider].append(path)
+
+                        with open(path, 'r+') as f:
+                            data = json.load(f)
+                            metadata = data.get("_proxy_metadata", {})
+                            metadata["email"] = email
+                            metadata["last_check_timestamp"] = time.time()
+                            data["_proxy_metadata"] = metadata
+                            f.seek(0)
+                            json.dump(data, f, indent=2)
+                            f.truncate()
+
+                except Exception as e:
+                    logging.error(f"Failed to process OAuth token for {provider} at '{path}': {e}")
+
+        logging.info("OAuth credential processing complete.")
+        oauth_credentials = final_oauth_credentials
+
+    # [NEW] Load provider-specific params
+    litellm_provider_params = {
+        "gemini_cli": {"project_id": os.getenv("GEMINI_CLI_PROJECT_ID")}
+    }
+
+    # The client now uses the root logger configuration
+    client = RotatingClient(
+        api_keys=api_keys,
+        oauth_credentials=oauth_credentials, # Pass OAuth config
+        configure_logging=True,
+        litellm_provider_params=litellm_provider_params, # [NEW]
+        ignore_models=ignore_models,
+        whitelist_models=whitelist_models
+    )
+    client.background_refresher.start() # Start the background task
     app.state.rotating_client = client
     os.environ["LITELLM_LOG"] = "ERROR"
     litellm.set_verbose = False
@@ -146,6 +299,7 @@ async def lifespan(app: FastAPI):
         
     yield
     
+    await client.background_refresher.stop() # Stop the background task on shutdown
     if app.state.embedding_batcher:
         await app.state.embedding_batcher.stop()
     await client.close()
@@ -185,7 +339,8 @@ async def verify_api_key(auth: str = Depends(api_key_header)):
 async def streaming_response_wrapper(
     request: Request,
     request_data: dict,
-    response_stream: AsyncGenerator[str, None]
+    response_stream: AsyncGenerator[str, None],
+    logger: Optional[DetailedLogger] = None
 ) -> AsyncGenerator[str, None]:
     """
     Wraps a streaming response to log the full response after completion
@@ -206,8 +361,10 @@ async def streaming_response_wrapper(
                     try:
                         chunk_data = json.loads(content)
                         response_chunks.append(chunk_data)
+                        if logger:
+                            logger.log_stream_chunk(chunk_data)
                     except json.JSONDecodeError:
-                        pass  # Ignore non-JSON chunks
+                        pass
     except Exception as e:
         logging.error(f"An error occurred during the response stream: {e}")
         # Yield a final error message to the client to ensure they are not left hanging.
@@ -221,13 +378,8 @@ async def streaming_response_wrapper(
         yield f"data: {json.dumps(error_payload)}\n\n"
         yield "data: [DONE]\n\n"
         # Also log this as a failed request
-        if ENABLE_REQUEST_LOGGING:
-            log_request_response(
-                request_data=request_data,
-                response_data={"error": str(e)},
-                is_streaming=True,
-                log_type="completion"
-            )
+        if logger:
+            logger.log_final_response(status_code=500, headers=None, body={"error": str(e)})
         return # Stop further processing
     finally:
         if response_chunks:
@@ -257,22 +409,29 @@ async def streaming_response_wrapper(
                             for tc_chunk in value:
                                 index = tc_chunk["index"]
                                 if index not in aggregated_tool_calls:
-                                    aggregated_tool_calls[index] = {"id": None, "type": "function", "function": {"name": "", "arguments": ""}}
+                                    aggregated_tool_calls[index] = {"function": {"name": "", "arguments": ""}} # Initialize with minimal required keys
+                                # Ensure 'function' key exists for this index before accessing its sub-keys
+                                if "function" not in aggregated_tool_calls[index]:
+                                    aggregated_tool_calls[index]["function"] = {"name": "", "arguments": ""}
                                 if tc_chunk.get("id"):
                                     aggregated_tool_calls[index]["id"] = tc_chunk["id"]
                                 if "function" in tc_chunk:
                                     if "name" in tc_chunk["function"]:
-                                        aggregated_tool_calls[index]["function"]["name"] += tc_chunk["function"]["name"]
+                                        if tc_chunk["function"]["name"] is not None:
+                                            aggregated_tool_calls[index]["function"]["name"] += tc_chunk["function"]["name"]
                                     if "arguments" in tc_chunk["function"]:
-                                        aggregated_tool_calls[index]["function"]["arguments"] += tc_chunk["function"]["arguments"]
+                                        if tc_chunk["function"]["arguments"] is not None:
+                                            aggregated_tool_calls[index]["function"]["arguments"] += tc_chunk["function"]["arguments"]
                         
                         elif key == "function_call":
                             if "function_call" not in final_message:
                                 final_message["function_call"] = {"name": "", "arguments": ""}
                             if "name" in value:
-                                final_message["function_call"]["name"] += value["name"]
+                                if value["name"] is not None:
+                                    final_message["function_call"]["name"] += value["name"]
                             if "arguments" in value:
-                                final_message["function_call"]["arguments"] += value["arguments"]
+                                if value["arguments"] is not None:
+                                    final_message["function_call"]["arguments"] += value["arguments"]
                         
                         else: # Generic key handling for other data like 'reasoning'
                             if key not in final_message:
@@ -313,12 +472,11 @@ async def streaming_response_wrapper(
                 "usage": usage_data
             }
 
-        if ENABLE_REQUEST_LOGGING:
-            log_request_response(
-                request_data=request_data,
-                response_data=full_response,
-                is_streaming=True,
-                log_type="completion"
+        if logger:
+            logger.log_final_response(
+                status_code=200,
+                headers=None,  # Headers are not available at this stage
+                body=full_response
             )
 
 @app.post("/v1/chat/completions")
@@ -331,8 +489,12 @@ async def chat_completions(
     OpenAI-compatible endpoint powered by the RotatingClient.
     Handles both streaming and non-streaming responses and logs them.
     """
+    logger = DetailedLogger() if ENABLE_REQUEST_LOGGING else None
     try:
         request_data = await request.json()
+        if logger:
+            logger.log_request(headers=request.headers, body=request_data)
+
         log_request_to_console(
             url=str(request.url),
             headers=dict(request.headers),
@@ -344,17 +506,20 @@ async def chat_completions(
         if is_streaming:
             response_generator = client.acompletion(request=request, **request_data)
             return StreamingResponse(
-                streaming_response_wrapper(request, request_data, response_generator),
+                streaming_response_wrapper(request, request_data, response_generator, logger),
                 media_type="text/event-stream"
             )
         else:
             response = await client.acompletion(request=request, **request_data)
-            if ENABLE_REQUEST_LOGGING:
-                log_request_response(
-                    request_data=request_data,
-                    response_data=response.model_dump(),
-                    is_streaming=False,
-                    log_type="completion"
+            if logger:
+                # Assuming response has status_code and headers attributes
+                # This might need adjustment based on the actual response object
+                response_headers = response.headers if hasattr(response, 'headers') else None
+                status_code = response.status_code if hasattr(response, 'status_code') else 200
+                logger.log_final_response(
+                    status_code=status_code,
+                    headers=response_headers,
+                    body=response.model_dump()
                 )
             return response
 
@@ -378,12 +543,8 @@ async def chat_completions(
                 request_data = await request.json()
             except json.JSONDecodeError:
                 request_data = {"error": "Could not parse request body"}
-            log_request_response(
-                request_data=request_data,
-                response_data={"error": str(e)},
-                is_streaming=request_data.get("stream", False),
-                log_type="completion"
-            )
+            if logger:
+                logger.log_final_response(status_code=500, headers=None, body={"error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/v1/embeddings")
@@ -448,20 +609,6 @@ async def embeddings(
             
             response = await client.aembedding(request=request, **request_data)
 
-        if ENABLE_REQUEST_LOGGING:
-            response_summary = {
-                "model": response.model,
-                "object": response.object,
-                "usage": response.usage.model_dump(),
-                "data_count": len(response.data),
-                "embedding_dimensions": len(response.data[0].embedding) if response.data else 0
-            }
-            log_request_response(
-                request_data=body.model_dump(exclude_none=True),
-                response_data=response_summary,
-                is_streaming=False,
-                log_type="embedding"
-            )
         return response
 
     except HTTPException as e:
@@ -481,35 +628,24 @@ async def embeddings(
         raise HTTPException(status_code=502, detail=f"Bad Gateway: {str(e)}")
     except Exception as e:
         logging.error(f"Embedding request failed: {e}")
-        if ENABLE_REQUEST_LOGGING:
-            try:
-                request_data = await request.json()
-            except json.JSONDecodeError:
-                request_data = {"error": "Could not parse request body"}
-            log_request_response(
-                request_data=request_data,
-                response_data={"error": str(e)},
-                is_streaming=False,
-                log_type="embedding"
-            )
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
 def read_root():
     return {"Status": "API Key Proxy is running"}
 
-@app.get("/v1/models")
+@app.get("/v1/models", response_model=ModelList)
 async def list_models(
-    grouped: bool = False, 
     client: RotatingClient = Depends(get_rotating_client),
     _=Depends(verify_api_key)
 ):
     """
-    Returns a list of available models from all configured providers.
-    Waits for the background cache to be ready before returning.
+    Returns a list of available models in the OpenAI-compatible format.
     """
-    models = await client.get_all_available_models(grouped=grouped)
-    return models
+    model_ids = await client.get_all_available_models(grouped=False)
+    model_cards = [ModelCard(id=model_id) for model_id in model_ids]
+    return ModelList(data=model_cards)
+
 
 @app.get("/v1/providers")
 async def list_providers(_=Depends(verify_api_key)):
@@ -543,5 +679,8 @@ async def token_count(
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host=args.host, port=args.port)
+    if args.add_credential:
+        run_credential_tool()
+    else:
+        import uvicorn
+        uvicorn.run(app, host=args.host, port=args.port)
