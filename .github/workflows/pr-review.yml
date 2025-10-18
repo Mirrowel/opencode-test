@@ -36,7 +36,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.generate_token.outputs.token }}
         run: |
-          pr_json=$(gh pr view ${{ env.PR_NUMBER }} --json headRefName,headRepository,title,body,headSha)
+          pr_json=$(gh pr view ${{ env.PR_NUMBER }} --json headRefName,headRepository,title,body,headSha,comments,reviews,closingIssuesReferences)
           
           # Set outputs for the checkout step
           echo "repo_full_name=$(echo "$pr_json" | jq -r .headRepository.nameWithOwner)" >> $GITHUB_OUTPUT
@@ -46,6 +46,52 @@ jobs:
           echo "PR_TITLE=$(echo "$pr_json" | jq -r .title)" >> $GITHUB_ENV
           echo "PR_BODY=$(echo "$pr_json" | jq -r .body)" >> $GITHUB_ENV
           echo "PR_HEAD_SHA=$(echo "$pr_json" | jq -r .headSha)" >> $GITHUB_ENV
+
+          {
+            echo "LINKED_ISSUES_CONTEXT<<EOF"
+            if [ "$(echo "$pr_json" | jq '.closingIssuesReferences.nodes | length')" -gt 0 ]; then
+              echo "$pr_json" | jq -r '.closingIssuesReferences.nodes[] | 
+                "<issue>\n" +
+                "  <number>#\(.number)</number>\n" +
+                "  <title>\(.title)</title>\n" +
+                "  <body>\n\(.body)\n</body>\n" +
+                "</issue>\n"'
+            else
+              echo "No issues are formally linked for closure by this PR - but still can be referenced in it."
+            fi
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+           # Format and set PR_CONTEXT (comments and reviews)
+          {
+            echo "PR_CONTEXT<<EOF"
+            
+            # Format top-level comments
+            if [ "$(echo "$pr_json" | jq '.comments | length')" -gt 0 ]; then
+              echo "### General PR Comments"
+              echo "$pr_json" | jq -r '.comments[] | "Author: @\(.author.login)\nDate: \(.createdAt)\n\n\(.body)\n\n---\n"'
+            fi
+
+            # Format formal reviews and their line-comments
+            if [ "$(echo "$pr_json" | jq '.reviews | length')" -gt 0 ]; then
+              echo "### Formal Code Reviews"
+              echo "$pr_json" | jq -r '.reviews[] | 
+                "Reviewer: @\(.author.login)\nState: \(.state)\nDate: \(.createdAt)\n\n\(.body)\n" + 
+                (if .comments.nodes | length > 0 then 
+                  "#### Line Comments in this Review:\n" + (
+                    .comments.nodes[] | "- **File:** \(.path) **Line:** \(.line)\n  - **Comment:** \(.body)\n"
+                  ) 
+                else "" end) +
+                "\n---\n"'
+            fi
+
+            # Handle case where there is no context
+            if [ "$(echo "$pr_json" | jq '.comments | length')" -eq 0 ] && [ "$(echo "$pr_json" | jq '.reviews | length')" -eq 0 ]; then
+              echo "No comments or reviews have been submitted yet."
+            fi
+
+            echo "EOF"
+          } >> "$GITHUB_ENV"
 
       # STEP 2: Use the fetched metadata to perform a safe checkout.
       - name: Checkout PR head
@@ -75,7 +121,10 @@ jobs:
                 },
                 "models": {
                   "${{ secrets.OPENCODE_MODEL }}": {
-                    "name": "Custom Model"
+                    "name": "Custom Model",
+                    "limit": {
+                      "context": 262000
+                    }
                   }
                 }
               }
@@ -137,10 +186,28 @@ jobs:
           ${{ env.PR_BODY }}
           </pr-description>
 
+          <linked-issues-for-closure>
+          This PR is intended to close the following issues. They provide the critical context for your review.
+          ${{ env.LINKED_ISSUES_CONTEXT }}
+          </linked-issues-for-closure>
+
+          <existing-reviews-and-comments>
+          ${{ env.PR_CONTEXT }}
+          </existing-reviews-and-comments>
+
+          Before diving into a line-by-line review, first consider the "big picture". Does this PR's overall approach make sense? Does it fit within the existing architecture? Is there a simpler way to achieve the same goal? Address these high-level points in your summary comment.
+          Frame your feedback constructively. Instead of "This is wrong," prefer "Have you considered this alternative approach because...?" If you are unsure about the author's intent, ask clarifying questions.
+
           Conduct a comprehensive review of this pull request by performing the following tasks:
           1.  **Analyze the Changes:** Fetch the pull request branch and carefully inspect all code modifications in their full context.
           2.  **Verify the Implementation:** Ensure that the implementation correctly addresses the goals stated in the PR description and any linked issues.
-          3.  **Assess Code Quality:** Evaluate the code for quality, adherence to architectural patterns, potential security vulnerabilities, performance implications, and test coverage.
+          3.  **Assess Code Quality:** Evaluate the code against these criteria:
+              - **Clarity & Readability:** Is the code easy to understand? Are variable names clear?
+            - **Security:** Are there any potential vulnerabilities (e.g., injection, improper error handling, dependency issues)?
+            - **Performance:** Could any of this code introduce performance bottlenecks?
+            - **Testing:** Are there sufficient tests for the new logic? If it's a bug fix, is there a regression test?
+            - **Documentation:** Are comments, docstrings, and external docs (`README.md`, etc.) updated accordingly?
+            - **Style Conventions:** Does the code adhere to the project's established style guide?
           4.  **Check for Completeness:** Verify that all related tasks are resolved, documentation is updated, and there are no regressions.
 
           For specific feedback, post comments on the exact lines of code using the `gh api` command. Provide clear explanations and use suggestion blocks for code improvements where applicable. Here is the command template:
@@ -156,8 +223,10 @@ jobs:
           After posting all line-specific comments, leave a single summary comment on the PR using `gh pr comment`. This summary should follow this structure:
 
           **Overall Assessment:** A brief, high-level summary of the pull request. (e.g., 'This PR looks solid and addresses the issue well, with a few minor suggestions for improvement.')
-          **Key Suggestions:** A bulleted list of your most important feedback points.
-          **Nitpicks and Minor Points:** A separate section for smaller, optional suggestions.
+          **Architectural Feedback (if any):** High-level comments on the overall approach.
+          **Key Suggestions:** A bulleted list of the most important feedback points that should be addressed.
+          **Nitpicks and Minor Points:** A separate section for smaller, optional suggestions (e.g., code style, typos).
+          **Questions for the Author:** A list of clarifying questions to start a discussion.
 
           If the PR is excellent and requires no changes, provide a positive and encouraging summary. Make it clear that your comments are suggestions for the author to consider.
           EOF

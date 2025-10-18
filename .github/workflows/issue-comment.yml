@@ -51,7 +51,10 @@ jobs:
                 },
                 "models": {
                   "${{ secrets.OPENCODE_MODEL }}": {
-                    "name": "Custom Model"
+                    "name": "Custom Model",
+                    "limit": {
+                      "context": 262000
+                    }
                   }
                 }
               }
@@ -98,7 +101,7 @@ jobs:
           GH_TOKEN: ${{ steps.generate_token.outputs.token }}
         run: |
           # Fetch the full JSON data
-          issue_data=$(gh issue view ${{ env.ISSUE_NUMBER }} --json title,body)
+          issue_data=$(gh issue view ${{ env.ISSUE_NUMBER }} --json title,body,comments)
           
           # Extract title (usually single-line, but this is safer)
           issue_title=$(echo "$issue_data" | jq -r .title)
@@ -108,6 +111,15 @@ jobs:
           issue_body=$(echo "$issue_data" | jq -r .body)
           echo "ISSUE_BODY<<EOF" >> $GITHUB_ENV
           echo "$issue_body" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+          # Set ISSUE_COMMENTS by formatting them cleanly
+          echo "ISSUE_COMMENTS<<EOF" >> $GITHUB_ENV
+          if [ "$(echo "$issue_data" | jq '.comments | length')" -gt 0 ]; then
+            echo "$(echo "$issue_data" | jq -r '.comments[] | "Author: @\(.author.login)\nDate: \(.createdAt)\n\n\(.body)\n\n---\n"')" >> $GITHUB_ENV
+          else
+            echo "No comments have been posted yet." >> $GITHUB_ENV
+          fi
           echo "EOF" >> $GITHUB_ENV
 
       - name: Analyze issue and suggest resolution
@@ -138,18 +150,42 @@ jobs:
           ${{ env.ISSUE_BODY }}
           </issue-description>
 
+          <existing-comments>
+          ${{ env.ISSUE_COMMENTS }}
+          </existing-comments>
+
           Investigate this issue thoroughly by following these steps:
-          1.  **Understand the Problem:** Scrutinize the issue title and description to fully grasp the reported problem.
-          2.  **Explore the Codebase:** Navigate the repository to find the most relevant files, configurations, or recent commits related to the issue. Utilize `git` and `gh` commands for this exploration.
-          3.  **Identify the Root Cause:** Based on your code exploration, determine the most likely root cause of the issue.
-          4.  **Validate the Issue:** Assess if the issue is valid, a duplicate, or if it requires more information from the user.
-          5.  **Propose a Solution:** Outline a clear and actionable plan for remediation. This should include specific files to modify and the proposed changes.
+            1. **Search for Duplicates:** Lookup this issue and search through existing issues (excluding #${{ env.ISSUE_NUMBER }}) in this repository to find any potential duplicates of this new issue.
+            Consider:
+            - Similar titles or descriptions
+            - Same error messages or symptoms
+            - Related functionality or components
+            - Similar feature requests
+
+            If you find any potential duplicates, comment on the new issue with:
+            - A brief explanation of why it might be a duplicate
+            - Links to the potentially duplicate issues
+            - A suggestion to check those issues first
+
+            Use this format for the comment:
+            'This issue might be a duplicate of existing issues. Please check:
+            - #[issue_number]: [brief description of similarity]
+
+            If duplicates are found, stop further analysis.
+          2.  **Understand the Problem:** Scrutinize the issue title and description to fully grasp the reported problem. Identify the specific branch(es), files, or commit(s) mentioned.
+          3.  **Explore the Codebase:** Navigate the repository to find the most relevant files, configurations, or recent commits related to the issue. Utilize `git` and `gh` commands for this exploration. Navigate the repository to find the most relevant files. Use `git log --grep="<keyword>"` to find related commits, `git grep "<error_message>"` to search the codebase for error strings, and `git blame <file>` to inspect the history of suspicious files. Start by getting an overview of the project structure with `ls -R`.
+          4.  **Identify the Root Cause:** Based on your code exploration, determine the most likely root cause of the issue.
+          5.  **Validate the Issue:** Assess if the issue is valid and if the description provides enough information to reproduce the problem. If not, explicitly state what is missing (e.g., "A minimal reproducible code example is needed," "Please provide the exact command you ran," "What version of Node.js are you using?").
+          6.  **Suggest Labels:** Based on your analysis, suggest appropriate labels for this issue. Choose from the following common labels: `bug`, `enhancement`, `documentation`, `question`, `help-wanted`, `good first issue`, `needs-reproduction`. Provide a brief justification for your choices.
+          7.  **Propose a Solution:** Outline a clear and actionable plan for remediation. This should include specific files to modify and the proposed changes.
 
           After your investigation, summarize your findings in a single, well-formatted comment on the issue using `gh issue comment`. The comment should have the following structure:
 
           **Summary:** A one-sentence overview of your findings.
           **Issue Validation:** State whether the issue is `Confirmed`, `Partially Confirmed`, `Needs More Info`, or a `Duplicate`.
+          **Reproducibility Assessment:** `Reproducible` | `Not Reproducible` | `Needs More Info`.
           **Root Cause Analysis:** Explain the suspected root cause with supporting evidence (e.g., file paths, function names).
+          **Suggested Labels:** `bug`, `needs-reproduction` (Provide a short justification).
           **Proposed Next Steps:** Provide concrete steps or code snippets for the maintainers to resolve the issue.
           **Missing Information (if any):** If the issue cannot be fully validated, clearly state what information is needed from the issue filer.
 

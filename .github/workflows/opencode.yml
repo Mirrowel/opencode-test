@@ -47,7 +47,10 @@ jobs:
                 },
                 "models": {
                   "${{ secrets.OPENCODE_MODEL }}": {
-                    "name": "Custom Model"
+                    "name": "Custom Model",
+                    "limit": {
+                      "context": 262000
+                    }
                   }
                 }
               }
