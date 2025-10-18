@@ -123,9 +123,9 @@ jobs:
               "webfetch": "deny"
             }
         run: |
-          # Use a heredoc (<<EOF) to pass the prompt safely via stdin.
+          # Use a heredoc (<<'EOF') to pass the prompt safely via stdin.
           # The "-" tells the opencode command to read the prompt from stdin.
-          opencode run --share -m llm-proxy/${{ secrets.OPENCODE_MODEL }} - <<EOF
+          opencode run --share -m llm-proxy/${{ secrets.OPENCODE_MODEL }} - <<'EOF'
           You are an expert software engineer specializing in bug detection and resolution. Your goal is to provide a comprehensive initial analysis of this new issue to help the maintainers.
 
           A new issue has been created: '${{ env.ISSUE_TITLE }}'
