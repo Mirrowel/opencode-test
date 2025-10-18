@@ -1,0 +1,108 @@
+name: PR Review
+
+on:
+  pull_request_target:
+    types: [opened]
+
+jobs:
+  review-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Inject Custom Config (For Proxy Support)
+        run: |
+          mkdir -p ~/.config/opencode
+          # Build and write opencode.json with secrets
+          CONFIG='{
+            "$schema": "https://opencode.ai/config.json",
+            "provider": {
+              "llm-proxy": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Proxy",
+                "options": {
+                  "baseURL": "${{ secrets.PROXY_BASE_URL }}",
+                  "apiKey": "${{ secrets.PROXY_API_KEY }}",
+                  "headers": {
+                    "User-Agent": "OpenCode/1.0",
+                    "X-Custom-Header": "your-value"
+                  }
+                },
+                "models": {
+                  "${{ secrets.OPENCODE_MODEL }}": {
+                    "name": "Custom Model"
+                  }
+                }
+              }
+            },
+            "autoupdate": true
+          }'
+          echo "$CONFIG" > ~/.config/opencode/opencode.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-3.12-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-3.12
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Install opencode
+        run: curl -fsSL https://opencode.ai/install | bash
+
+      - name: Review PR comprehensively
+        env:
+          OPENCODE_API_KEY: ${{ secrets.PROXY_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENCODE_PERMISSION: |
+            {
+              "bash": {
+                "gh*": "allow",
+                "git*": "allow",
+                "*": "allow"
+              },
+              "webfetch": "deny"
+            }
+        run: |
+          opencode run -m llm-proxy/${{ secrets.OPENCODE_MODEL }} "A new pull request has been created: '${{ github.event.pull_request.title }}'
+
+          <pr-number>
+          ${{ github.event.pull_request.number }}
+          </pr-number>
+
+          <pr-description>
+          ${{ github.event.pull_request.body }}
+          </pr-description>
+
+          Thoroughly review the implementation in this pull request. Perform these tasks:
+          1. Fetch the pull request branch and inspect all code changes in context, including linked commits and related files. Use git and gh commands as needed.
+          2. Evaluate if the implementation correctly addresses the stated goals and any linked issues (inspect referenced issues via gh, validating requirements and acceptance criteria).
+          3. Assess code quality, architecture alignment, security implications, performance considerations, test coverage, and documentation updates. Identify missing tests or docs when relevant.
+          4. Verify completeness: ensure all referenced issues or tasks are resolved, new edge cases are handled, and regressions are avoided. Note any TODOs or missing follow-up.
+
+          When you identify a concrete problem or improvement, create a review comment using the gh CLI on the exact line whenever possible. Provide actionable feedback and suggested fixes inside suggestion code blocks when appropriate. Use this command template for each comment:
+          \`\`\`
+          gh api \
+            --method POST \
+            -H \"Accept: application/vnd.github+json\" \
+            -H \"X-GitHub-Api-Version: 2022-11-28\" \
+            /repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments \
+            -f 'body=[summary of issue]' -f 'commit_id=${{ github.event.pull_request.head.sha }}' -f 'path=[path-to-file]' -F \"line=[line]\" -f 'side=RIGHT'
+          \`\`\`
+
+          For broader feedback that cannot be placed on a specific line, leave a single summary comment using gh pr comment. Make it clear the comments are suggestions and humans can decide what to do. If everything looks good - post summary of your findings."

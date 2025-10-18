@@ -1,0 +1,100 @@
+name: Issue Comment
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  check-issue:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Inject Custom Config (For Proxy Support)
+        run: |
+          mkdir -p ~/.config/opencode
+          # Build and write opencode.json with secrets
+          CONFIG='{
+            "$schema": "https://opencode.ai/config.json",
+            "provider": {
+              "llm-proxy": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Proxy",
+                "options": {
+                  "baseURL": "${{ secrets.PROXY_BASE_URL }}",
+                  "apiKey": "${{ secrets.PROXY_API_KEY }}",
+                  "headers": {
+                    "User-Agent": "OpenCode/1.0",
+                    "X-Custom-Header": "your-value"
+                  }
+                },
+                "models": {
+                  "${{ secrets.OPENCODE_MODEL }}": {
+                    "name": "Custom Model"
+                  }
+                }
+              }
+            },
+            "autoupdate": true
+          }'
+          echo "$CONFIG" > ~/.config/opencode/opencode.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-3.12-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-3.12
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Install opencode
+        run: curl -fsSL https://opencode.ai/install | bash
+
+      - name: Analyze issue and suggest resolution
+        env:
+          OPENCODE_API_KEY: ${{ secrets.PROXY_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENCODE_PERMISSION: |
+            {
+              "bash": {
+                "gh*": "allow",
+                "git*": "allow",
+                "*": "allow"
+              },
+              "webfetch": "deny"
+            }
+        run: |
+          opencode run -m llm-proxy/${{ secrets.OPENCODE_MODEL }} "A new issue has been created:
+
+          Issue number:
+          ${{ github.event.issue.number }}
+
+          Investigate this issue thoroughly:
+          1. Inspect the issue title and body to understand the reported problem and expected behavior.
+          2. Explore the repository to locate relevant files, configurations, or recent changes. Use git and gh commands to inspect history, related PRs, and commits. Checkout branches if necessary.
+          3. Determine the likely root cause based on the existing code and tests. Run targeted commands or tests if helpful.
+          4. Assess whether the issue is valid, already resolved, or needs more information. Identify edge cases or missing details.
+          5. Outline a concrete remediation plan, including files to change, suggested code adjustments, new tests or documentation updates.
+
+          Summarize your findings and recommendations in a single comment on the issue using gh issue comment. Include:
+          - A brief validation statement (confirmed, partially confirmed, needs more info, etc.).
+          - The suspected root cause and supporting evidence (file paths, functions, logical reasoning).
+          - Specific next steps or fixes the maintainers can apply.
+          - Optional code snippets or commands to reproduce/verify.
+
+          Keep the tone professional and actionable. If the issue cannot be validated, clearly state why and what information is missing before work can proceed."
