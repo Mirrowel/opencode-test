@@ -7,7 +7,7 @@ import os
 import random
 import httpx
 import litellm
-from litellm.exceptions import APIConnectionError
+from litellm.exceptions import APIConnectionError, AuthenticationError
 from litellm.litellm_core_utils.token_counter import token_counter
 import logging
 from typing import List, Dict, Any, AsyncGenerator, Optional, Union
@@ -57,7 +57,7 @@ class RotatingClient:
         self.max_retries = max_retries
         self.global_timeout = global_timeout
         self.abort_on_callback_error = abort_on_callback_error
-        self.usage_manager = UsageManager(file_path=usage_file_path)
+        self.usage_manager = UsageManager(file_path=usage_file_path, clock_skew_seconds=120)
         self._model_list_cache = {}
         self._provider_plugins = PROVIDER_PLUGINS
         self._provider_instances = {}
@@ -168,6 +168,27 @@ class RotatingClient:
                 await self._model_list_cache_task
             except asyncio.CancelledError:
                 lib_logger.info("Model cache population task cancelled.")
+
+    async def _refresh_token(self, key: Optional[str], provider: str) -> bool:
+        """
+        Placeholder method for token refresh logic.
+        This would be implemented based on specific provider requirements.
+        Returns True if refresh was successful, False otherwise.
+        """
+        # Safety check for None key
+        if not key:
+            lib_logger.warning("Cannot refresh token: key is None")
+            return False
+            
+        # This is a placeholder implementation
+        # In a real implementation, this would:
+        # 1. Use the provider's refresh token endpoint
+        # 2. Update the stored token for the key
+        # 3. Record the new token expiration in the usage manager
+        
+        lib_logger.info(f"Token refresh placeholder for key ...{key[-4:]} and provider {provider}")
+        # For now, just return False to indicate refresh not implemented
+        return False
 
     def start_model_cache_population(self):
         """Starts the background task to populate the model cache."""
@@ -345,7 +366,7 @@ class RotatingClient:
                 yield "data: [DONE]\n\n"
 
     async def _execute_with_retry(self, api_call: callable, request: Optional[Any], pre_request_callback: Optional[callable] = None, **kwargs) -> Any:
-        """A generic retry mechanism for non-streaming API calls."""
+        """A generic retry mechanism for non-streaming API calls with proactive token refresh."""
         model = kwargs.get("model")
         if not model:
             raise ValueError("'model' is a required parameter.")
@@ -483,6 +504,30 @@ class RotatingClient:
                         await asyncio.sleep(wait_time)
                         continue # Retry with the same key
 
+                    except (AuthenticationError,) as e:
+                        last_exception = e
+                        log_failure(api_key=current_key, model=model, attempt=attempt + 1, error=e, request_headers=dict(request.headers) if request else {})
+                        classified_error = classify_error(e)
+                        
+                        # Enhanced authentication error handling with token refresh
+                        lib_logger.warning(f"Authentication error on key ...{current_key[-4:]} for model {model}. Error: {str(e).split('\n')[0]}")
+                        
+                        # Attempt proactive token refresh if available
+                        from .error_handler import refresh_token_with_lock
+                        if current_key:
+                            refresh_success = await refresh_token_with_lock(current_key, lambda: self._refresh_token(current_key, provider))
+                        else:
+                            refresh_success = False
+                        
+                        if refresh_success:
+                            lib_logger.info(f"Token refresh successful for key ...{current_key[-4:]}. Retrying with refreshed token.")
+                            # Retry the same request with refreshed token
+                            continue
+                        else:
+                            lib_logger.warning(f"Token refresh failed for key ...{current_key[-4:]}. Rotating to next key.")
+                            await self.usage_manager.record_failure(current_key, model, classified_error)
+                            break # Move to the next key
+
                     except Exception as e:
                         last_exception = e
                         log_failure(api_key=current_key, model=model, attempt=attempt + 1, error=e, request_headers=dict(request.headers) if request else {})
@@ -611,6 +656,25 @@ class RotatingClient:
                             last_exception = e
                             
                             classified_error = classify_error(e)
+                            
+                            # Enhanced authentication error handling for streaming
+                            if classified_error.error_type == 'authentication':
+                                lib_logger.warning(f"Authentication error on key ...{current_key[-4:]} during stream for model {model}. Error: {str(e).split('\n')[0]}")
+                                
+                                # Attempt proactive token refresh if available
+                                from .error_handler import refresh_token_with_lock
+                                if current_key:
+                                    refresh_success = await refresh_token_with_lock(current_key, lambda: self._refresh_token(current_key, provider))
+                                else:
+                                    refresh_success = False
+                                
+                                if refresh_success:
+                                    lib_logger.info(f"Token refresh successful for key ...{current_key[-4:]}. Retrying with refreshed token.")
+                                    continue
+                                else:
+                                    lib_logger.warning(f"Token refresh failed for key ...{current_key[-4:]}. Rotating to next key.")
+                                    await self.usage_manager.record_failure(current_key, model, classified_error)
+                                    break
                             
                             # This is the final, robust handler for streamed errors.
                             error_payload = {}
