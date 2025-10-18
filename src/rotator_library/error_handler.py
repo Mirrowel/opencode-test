@@ -1,7 +1,15 @@
 import re
+import asyncio
+import time
+import logging
 from typing import Optional, Dict, Any
 
 from litellm.exceptions import APIConnectionError, RateLimitError, ServiceUnavailableError, AuthenticationError, InvalidRequestError, BadRequestError, OpenAIError, InternalServerError, Timeout, ContextWindowExceededError
+
+lib_logger = logging.getLogger('rotator_library')
+lib_logger.propagate = False
+if not lib_logger.handlers:
+    lib_logger.addHandler(logging.NullHandler())
 
 class NoAvailableKeysError(Exception):
     """Raised when no API keys are available for a request after waiting."""
@@ -21,6 +29,25 @@ class ClassifiedError:
 
     def __str__(self):
         return f"ClassifiedError(type={self.error_type}, status={self.status_code}, retry_after={self.retry_after}, original_exc={self.original_exception})"
+
+# Global refresh lock to prevent concurrent token refresh attempts
+_refresh_locks: Dict[str, asyncio.Lock] = {}
+
+async def refresh_token_with_lock(key: str, refresh_func) -> bool:
+    """
+    Prevents concurrent token refresh attempts using a per-key lock.
+    Returns True if refresh was successful, False otherwise.
+    """
+    if key not in _refresh_locks:
+        _refresh_locks[key] = asyncio.Lock()
+    
+    async with _refresh_locks[key]:
+        try:
+            lib_logger.info(f"Attempting token refresh for key ...{key[-4:]} with concurrency protection")
+            return await refresh_func()
+        except Exception as e:
+            lib_logger.error(f"Token refresh failed for key ...{key[-4:]}: {e}")
+            return False
 
 import json
 
