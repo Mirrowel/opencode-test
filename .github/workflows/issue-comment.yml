@@ -62,35 +62,43 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      # MODIFICATION: Replaced manual install and run with the official action
+      - name: Install opencode
+        run: curl -fsSL https://opencode.ai/install | bash
+      
+      # FIX: Create the directory that opencode expects
+      - name: Ensure opencode directory exists
+        run: mkdir -p ~/.local/share/opencode
+
       - name: Analyze issue and suggest resolution
-        uses: sst/opencode/github@latest
         env:
-          # The action handles the GITHUB_TOKEN automatically
           OPENCODE_API_KEY: ${{ secrets.PROXY_API_KEY }}
-          # The action sets its own robust permissions
-          # OPENCODE_PERMISSION is not needed here
-        with:
-          model: llm-proxy/${{ secrets.OPENCODE_MODEL }}
-          share: true
-          # log-level: DEBUG
-          prompt: |
-            A new issue has been created:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENCODE_PERMISSION: |
+            {
+              "bash": {
+                "gh*": "allow",
+                "git*": "allow",
+                "*": "allow"
+              },
+              "webfetch": "deny"
+            }
+        run: |
+          opencode run --share --print-logs --log-level INFO -m llm-proxy/${{ secrets.OPENCODE_MODEL }} "A new issue has been created:
 
-            Issue number:
-            ${{ github.event.issue.number }}
+          Issue number:
+          ${{ github.event.issue.number }}
 
-            Investigate this issue thoroughly:
-            1. Inspect the issue title and body to understand the reported problem and expected behavior.
-            2. Explore the repository to locate relevant files, configurations, or recent changes. Use git and gh commands to inspect history, related PRs, and commits. Checkout branches if necessary.
-            3. Determine the likely root cause based on the existing code and tests. Run targeted commands or tests if helpful.
-            4. Assess whether the issue is valid, already resolved, or needs more information. Identify edge cases or missing details.
-            5. Outline a concrete remediation plan, including files to change, suggested code adjustments, new tests or documentation updates.
+          Investigate this issue thoroughly:
+          1. Inspect the issue title and body to understand the reported problem and expected behavior.
+          2. Explore the repository to locate relevant files, configurations, or recent changes. Use git and gh commands to inspect history, related PRs, and commits. Checkout branches if necessary.
+          3. Determine the likely root cause based on the existing code and tests. Run targeted commands or tests if helpful.
+          4. Assess whether the issue is valid, already resolved, or needs more information. Identify edge cases or missing details.
+          5. Outline a concrete remediation plan, including files to change, suggested code adjustments, new tests or documentation updates.
 
-            Summarize your findings and recommendations in a single comment on the issue using gh issue comment. Include:
-            - A brief validation statement (confirmed, partially confirmed, needs more info, etc.).
-            - The suspected root cause and supporting evidence (file paths, functions, logical reasoning).
-            - Specific next steps or fixes the maintainers can apply.
-            - Optional code snippets or commands to reproduce/verify.
+          Summarize your findings and recommendations in a single comment on the issue using gh issue comment. Include:
+          - A brief validation statement (confirmed, partially confirmed, needs more info, etc.).
+          - The suspected root cause and supporting evidence (file paths, functions, logical reasoning).
+          - Specific next steps or fixes the maintainers can apply.
+          - Optional code snippets or commands to reproduce/verify.
 
-            Keep the tone professional and actionable. If the issue cannot be validated, clearly state why and what information is missing before work can proceed.
+          Keep the tone professional and actionable. If the issue cannot be validated, clearly state why and what information is missing before work can proceed."
