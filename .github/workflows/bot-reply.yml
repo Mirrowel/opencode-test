@@ -47,8 +47,12 @@ jobs:
           if [[ "$IS_PR" == "true" ]]; then
             pr_json=$(gh pr view ${{ env.THREAD_NUMBER }} --repo ${{ github.repository }} --json author,title,body,createdAt,state,headRefName,baseRefName,headRefOid,additions,deletions,commits,files,comments,reviews,closingIssuesReferences)
            
+            # Debug: Output pr_json for inspection
+            echo "$pr_json" > pr_json.txt
+            
             # For checkout step
-            echo "repo_full_name=$(echo "$pr_json" | jq -r .headRepository.nameWithOwner)" >> $GITHUB_OUTPUT
+            # Fallback to github.repository if headRepository is null
+            echo "repo_full_name=$(echo "$pr_json" | jq -r '.headRepository.nameWithOwner // "${{ github.repository }}"')" >> $GITHUB_OUTPUT
             echo "ref_name=$(echo "$pr_json" | jq -r .headRefName)" >> $GITHUB_OUTPUT
            
             # For prompt context
@@ -71,13 +75,13 @@ jobs:
             # Prepare comments
             comments=$(echo "$pr_json" | jq -r 'if (.comments | length) > 0 then .comments[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n\(.body // "")\n" else "No general comments." end')
             # Prepare reviews
-            reviews=$(echo "$pr_json" | jq -r 'if (.reviews | length) > 0 then .reviews[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n - Review body: \(.body // "No summary comment.")\n" + (if .comments.nodes | length > 0 then " - Comments:\n" + (.comments.nodes[] | " - \(.path):\(.line): \(.body // "")\n") else "" end) else "No formal reviews." end')
-           
+            reviews=$(echo "$pr_json" | jq -r 'if (.reviews | length) > 0 then .reviews[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n - Review body: \(.body // "No summary comment.")\n" + (if .comments | length > 0 then " - Comments:\n" + (.comments[] | " - \(.path):\(.line): \(.body // "")\n") else "" end) else "No formal reviews." end')
+
             # Prepare linked issues
-            linked_issues=$(echo "$pr_json" | jq -r 'if (.closingIssuesReferences.nodes | length) > 0 then .closingIssuesReferences.nodes[] | "<issue>\n <number>#\(.number)</number>\n <title>\(.title // "Title not available")</title>\n <body>\n\(.body // "Body not available")\n</body>\n</issue>\n" else "No issues are formally linked for closure by this PR." end')
-            # Step 1: Write the header for the multi-line environment variable.
+            linked_issues=$(echo "$pr_json" | jq -r 'if (.closingIssuesReferences | length) > 0 then .closingIssuesReferences[] | "<issue>\n <number>#\(.number)</number>\n <title>\(.title // "Title not available")</title>\n <body>\n\(.body // "Body not available")\n</body>\n</issue>\n" else "No issues are formally linked for closure by this PR." end')
+            # Step 1: Write the header for the multi-line environment variable
             echo "THREAD_CONTEXT<<$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
-            # Step 2: Append the content line by line. This avoids here-doc indentation issues.
+            # Step 2: Append the content line by line
             echo "Type: Pull Request" >> "$GITHUB_ENV"
             echo "PR Number: #${{ env.THREAD_NUMBER }}" >> "$GITHUB_ENV"
             echo "Title: $title" >> "$GITHUB_ENV"
@@ -105,9 +109,8 @@ jobs:
             echo "<linked_issues>" >> "$GITHUB_ENV"
             echo "$linked_issues" >> "$GITHUB_ENV"
             echo "</linked_issues>" >> "$GITHUB_ENV"
-            # Step 3: Write the closing delimiter.
+            # Step 3: Write the closing delimiter
             echo "$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
-            # --- END: ROBUST IMPLEMENTATION ---
           else # It's an Issue
             issue_data=$(gh issue view ${{ env.THREAD_NUMBER }} --repo ${{ github.repository }} --json author,title,body,createdAt,state,comments)
             timeline_data=$(gh api "/repos/${{ github.repository }}/issues/${{ env.THREAD_NUMBER }}/timeline")
@@ -125,9 +128,9 @@ jobs:
             references=$(echo "$timeline_data" | jq -r '.[] | select(.event == "cross-referenced") | .source.issue | "- Mentioned in \(.html_url | if contains("/pull/") then "PR" else "Issue" end): #\(.number) - \(.title)"')
             if [ -z "$references" ]; then references="No other issues or PRs have mentioned this thread."; fi
            
-            # Step 1: Write the header.
+            # Step 1: Write the header
             echo "THREAD_CONTEXT<<$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
-            # Step 2: Append the content line by line. This avoids here-doc indentation issues.
+            # Step 2: Append the content line by line
             echo "Type: Issue" >> "$GITHUB_ENV"
             echo "Issue Number: #${{ env.THREAD_NUMBER }}" >> "$GITHUB_ENV"
             echo "Title: $title" >> "$GITHUB_ENV"
@@ -143,7 +146,7 @@ jobs:
             echo "<cross_references>" >> "$GITHUB_ENV"
             echo "$references" >> "$GITHUB_ENV"
             echo "</cross_references>" >> "$GITHUB_ENV"
-            # Step 3: Write the footer.
+            # Step 3: Write the footer
             echo "$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
           fi
 
