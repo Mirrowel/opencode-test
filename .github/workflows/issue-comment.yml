@@ -1,10 +1,8 @@
-name: Issue Comment
+name: Issue Analysis
 
 on:
   issues:
     types: [opened]
-  
-    # Manual trigger
   workflow_dispatch:
     inputs:
       issueNumber:
@@ -19,17 +17,32 @@ jobs:
       contents: read
       issues: write
 
-    # Define an environment variable that works for both triggers
     env:
       # If triggered by 'issues', it uses github.event.issue.number.
       # If triggered by 'workflow_dispatch', it uses the number you provided in the form.
       ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issueNumber }}
-    
+
     steps:
+      - name: Generate GitHub App Token
+        id: generate_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          token: ${{ steps.generate_token.outputs.token }}
           fetch-depth: 0
+
+      - name: Configure Git for Bot
+        env:
+          GH_TOKEN: ${{ steps.generate_token.outputs.token }}
+        run: |
+          git config --global user.name "mirrobot-agent[bot]"
+          git config --global user.email "${{ secrets.BOT_APP_ID }}+mirrobot-agent@users.noreply.github.com"
+          git config --global url."https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/".insteadOf "https://github.com/"
 
       - name: Inject Custom Config (For Proxy Support)
         run: |
@@ -78,58 +91,46 @@ jobs:
             ${{ runner.os }}-pip-3.12
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-
-      - name: Generate GitHub App Token
-        id: generate_token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.BOT_APP_ID }}
-          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
-
-      - name: Configure Git for Bot
-        env:
-          GH_TOKEN: ${{ steps.generate_token.outputs.token }}
-        run: |
-          git config --global user.name "mirrobot-agent[bot]"
-          git config --global user.email "${{ secrets.BOT_APP_ID }}+mirrobot-agent@users.noreply.github.com"
-          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+        run: pip install -r requirements.txt
 
       - name: Install opencode
         run: curl -fsSL https://opencode.ai/install | bash
-      
-      # FIX: Create the directory that opencode expects
+
       - name: Ensure opencode directory exists
         run: mkdir -p /home/runner/.local/share/opencode/project
 
-      # NEW STEP: Fetch issue details so they are available for both triggers
-      - name: Fetch Issue Details
-        id: issue_details # Giving the step an ID can be useful
+      # MODIFIED: This step now gathers author and cross-references for richer context.
+      - name: Fetch Full Issue Context
+        id: issue_details
         env:
           GH_TOKEN: ${{ steps.generate_token.outputs.token }}
         run: |
-          # Fetch the full JSON data
-          issue_data=$(gh issue view ${{ env.ISSUE_NUMBER }} --json title,body,comments)
-          
-          # Extract title (usually single-line, but this is safer)
-          issue_title=$(echo "$issue_data" | jq -r .title)
-          echo "ISSUE_TITLE=$issue_title" >> $GITHUB_ENV
+          issue_data=$(gh issue view ${{ env.ISSUE_NUMBER }} --json author,title,body,comments)
+          echo "ISSUE_AUTHOR=$(echo "$issue_data" | jq -r .author.login)" >> $GITHUB_ENV
+          echo "ISSUE_TITLE=$(echo "$issue_data" | jq -r .title)" >> $GITHUB_ENV
+          { echo "ISSUE_BODY<<EOF"; echo "$issue_data" | jq -r .body; echo "EOF"; } >> "$GITHUB_ENV"
+          {
+            echo "ISSUE_COMMENTS<<EOF"
+            if [ "$(echo "$issue_data" | jq '.comments | length')" -gt 0 ]; then
+              echo "$issue_data" | jq -r '.comments[] | "Author: @\(.author.login // "unknown")\nDate: \(.createdAt // "N/A")\n\n\(.body // "")\n\n---\n"'
+            else
+              echo "No comments have been posted yet."
+            fi
+            echo "EOF"
+          } >> "$GITHUB_ENV"
 
-          # Extract body and use the multi-line heredoc syntax for GITHUB_ENV
-          issue_body=$(echo "$issue_data" | jq -r .body)
-          echo "ISSUE_BODY<<EOF" >> $GITHUB_ENV
-          echo "$issue_body" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-
-          # Set ISSUE_COMMENTS by formatting them cleanly
-          echo "ISSUE_COMMENTS<<EOF" >> $GITHUB_ENV
-          if [ "$(echo "$issue_data" | jq '.comments | length')" -gt 0 ]; then
-            echo "$(echo "$issue_data" | jq -r '.comments[] | "Author: @\(.author.login)\nDate: \(.createdAt)\n\n\(.body)\n\n---\n"')" >> $GITHUB_ENV
-          else
-            echo "No comments have been posted yet." >> $GITHUB_ENV
-          fi
-          echo "EOF" >> $GITHUB_ENV
+          # NEW: Fetch cross-references from the timeline API
+          timeline_data=$(gh api "/repos/${{ github.repository }}/issues/${{ env.ISSUE_NUMBER }}/timeline")
+          references=$(echo "$timeline_data" | jq -r '.[] | select(.event == "cross-referenced") | .source.issue | " - Mentioned in \(.html_url | if contains("/pull/") then "PR" else "Issue" end): #\(.number) - \(.title)"')
+          {
+            echo "CROSS_REFERENCES<<EOF"
+            if [ -n "$references" ]; then
+              echo "$references"
+            else
+              echo "No other issues or PRs have mentioned this thread."
+            fi
+            echo "EOF"
+          } >> "$GITHUB_ENV"
 
       - name: Analyze issue and suggest resolution
         env:
@@ -147,24 +148,46 @@ jobs:
           # Use a heredoc (<<'EOF') to pass the prompt safely via stdin.
           # The "-" tells the opencode command to read the prompt from stdin.
           opencode run --share -m llm-proxy/${{ secrets.OPENCODE_MODEL }} - <<'EOF'
-          You are an expert software engineer specializing in bug detection and resolution. Your goal is to provide a comprehensive initial analysis of this new issue to help the maintainers.
+          # [ROLE & OBJECTIVE]
+          You are an expert AI software engineer specializing in bug triage and analysis. Your goal is to provide a comprehensive initial analysis of this new issue to help the maintainers. You will perform an investigation and report your findings directly on the GitHub issue.
 
-          A new issue has been created: '${{ env.ISSUE_TITLE }}'
+          # [Your Identity]
+          You operate under the names **mirrobot**, **mirrobot-agent**, or the git user **mirrobot-agent[bot]**. When analyzing thread history, recognize actions by this name as your own.
 
-          <issue-number>
-          ${{ env.ISSUE_NUMBER }}
-          </issue-number>
+          # [COMMUNICATION GUIDELINES]
+          Your interaction must be in two steps to provide a good user experience:
+          1.  **Acknowledge:** Immediately post a short comment to let the user know you are starting your analysis.
+          2.  **Summarize:** After the analysis is complete, post a second, detailed comment with your full findings. Do not expose internal thought processes or tool executions in your comments; keep the output clean and professional.
 
-          <issue-description>
+          # [ISSUE CONTEXT]
+          - **Issue Number:** #${{ env.ISSUE_NUMBER }}
+          - **Title:** `${{ env.ISSUE_TITLE }}`
+          - **Author:** @${{ env.ISSUE_AUTHOR }}
+          - **Description:**
+          ---
           ${{ env.ISSUE_BODY }}
-          </issue-description>
-
-          <existing-comments>
+          ---
+          - **Cross-References (Mentions in other threads):**
+          ---
+          ${{ env.CROSS_REFERENCES }}
+          ---
+          - **Existing Comments:**
+          ---
           ${{ env.ISSUE_COMMENTS }}
-          </existing-comments>
+          ---
 
-          Investigate this issue thoroughly by following these steps:
-            1. **Search for Duplicates:** Lookup this issue and search through existing issues (excluding #${{ env.ISSUE_NUMBER }}) in this repository to find any potential duplicates of this new issue.
+          # [EXECUTION PLAN]
+          First, post your acknowledgment, then begin your investigation.
+
+          **Step 1: Post Acknowledgment Comment**
+          Use this command to inform the user you are starting.
+          ```bash
+          gh issue comment ${{ env.ISSUE_NUMBER }} --body "Thank you for submitting this issue. I am now beginning my analysis and will report back shortly."
+          ```
+
+          **Step 2: Conduct Investigation**
+          Internally, follow these steps. Do not output this part of the process to the user.
+          1. **Search for Duplicates:** Lookup this issue and search through existing issues (excluding #${{ env.ISSUE_NUMBER }}) in this repository to find any potential duplicates of this new issue.
             Consider:
             - Similar titles or descriptions
             - Same error messages or symptoms
@@ -181,22 +204,31 @@ jobs:
             - #[issue_number]: [brief description of similarity]
 
             If duplicates are found, stop further analysis.
-          2.  **Understand the Problem:** Scrutinize the issue title and description to fully grasp the reported problem. Identify the specific branch(es), files, or commit(s) mentioned.
+          2.  **Understand the Problem:** Read the title and description to grasp the problem. Identify the specific branch(es), files, or commit(s) mentioned.
           3.  **Explore the Codebase:** Navigate the repository to find the most relevant files, configurations, or recent commits related to the issue. Utilize `git` and `gh` commands for this exploration. Navigate the repository to find the most relevant files. Use `git log --grep="<keyword>"` to find related commits, `git grep "<error_message>"` to search the codebase for error strings, and `git blame <file>` to inspect the history of suspicious files. Start by getting an overview of the project structure with `ls -R`.
-          4.  **Identify the Root Cause:** Based on your code exploration, determine the most likely root cause of the issue.
-          5.  **Validate the Issue:** Assess if the issue is valid and if the description provides enough information to reproduce the problem. If not, explicitly state what is missing (e.g., "A minimal reproducible code example is needed," "Please provide the exact command you ran," "What version of Node.js are you using?").
-          6.  **Suggest Labels:** Based on your analysis, suggest appropriate labels for this issue. Choose from the following common labels: `bug`, `enhancement`, `documentation`, `question`, `help-wanted`, `good first issue`, `needs-reproduction`. Provide a brief justification for your choices.
-          7.  **Propose a Solution:** Outline a clear and actionable plan for remediation. This should include specific files to modify and the proposed changes.
+          4.  **Identify Root Cause:** Form a hypothesis about the root cause of the issue.
+          5.  **Validate the Issue:** Assess if the issue is valid and if the description provides enough information to reproduce the problem. Determine if the issue description is sufficient for reproduction. Try reproducing it if possible.
 
-          After your investigation, summarize your findings in a single, well-formatted comment on the issue using `gh issue comment`. The comment should have the following structure:
+          **Step 3: Post Final Analysis Comment**
+          After your internal investigation, post a single, well-formatted comment summarizing your findings. Use the command below, filling in the sections based on your analysis.
+          ```bash
+          gh issue comment ${{ env.ISSUE_NUMBER }} --body - <<'EOF'
+          ### Initial Analysis Report
 
-          **Summary:** A one-sentence overview of your findings.
-          **Issue Validation:** State whether the issue is `Confirmed`, `Partially Confirmed`, `Needs More Info`, or a `Duplicate`.
+          **Summary:** [A one-sentence overview of your findings.]
+          **Issue Validation:** [State `Confirmed`, `Partially Confirmed`, `Needs More Info`, or `Potential Duplicate`.]
           **Reproducibility Assessment:** `Reproducible` | `Not Reproducible` | `Needs More Info`.
-          **Root Cause Analysis:** Explain the suspected root cause with supporting evidence (e.g., file paths, function names).
-          **Suggested Labels:** `bug`, `needs-reproduction` (Provide a short justification).
-          **Proposed Next Steps:** Provide concrete steps or code snippets for the maintainers to resolve the issue.
-          **Missing Information (if any):** If the issue cannot be fully validated, clearly state what information is needed from the issue filer.
+          **Root Cause Analysis:** [Explain the suspected root cause with evidence like file paths and function names.]
+          **Suggested Labels:** [Suggest labels like `bug`, `documentation`, `enhancement`, `needs-reproduction` with a brief justification.]
+          **Proposed Next Steps:** [Provide concrete steps, code snippets, or a plan for resolution.]
+          **Missing Information (if any):** [Clearly state what information is needed from the issue filer, e.g., logs, code samples, or versions.]
 
-          At the end of your comment, add the following note: '_This analysis was generated by an AI assistant._ '
+          _This analysis was generated by an AI assistant._
+          EOF
+          ```
+
+          # [TOOLS NOTE]
+          When using `bash` to execute commands with a `--body` flag (like `gh issue comment`), the safest method for multi-line content is to use a heredoc (`<<'EOF'`). This prevents the shell from misinterpreting special characters.
+
+          Now, execute the plan. Start with Step 1.
           EOF

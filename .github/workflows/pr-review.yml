@@ -3,7 +3,7 @@ name: PR Review
 on:
   pull_request_target:
     types: [opened]
-  workflow_dispatch: # Allow manual runs
+  workflow_dispatch:
     inputs:
       prNumber:
         description: 'The number of the PR to review manually'
@@ -18,11 +18,9 @@ jobs:
       pull-requests: write
 
     env:
-      # Universally define the PR number for both triggers
       PR_NUMBER: ${{ github.event.pull_request.number || inputs.prNumber }}
 
     steps:
-
       - name: Generate GitHub App Token
         id: generate_token
         uses: actions/create-github-app-token@v1
@@ -36,84 +34,71 @@ jobs:
         run: |
           git config --global user.name "mirrobot-agent[bot]"
           git config --global user.email "${{ secrets.BOT_APP_ID }}+mirrobot-agent@users.noreply.github.com"
-          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/".insteadOf "https://github.com/"
 
-      # STEP 1: Fetch only the metadata needed for checkout.
-      - name: Fetch PR Metadata and Context
+      - name: Fetch Full PR Metadata and Context
         id: pr_meta
         env:
           GH_TOKEN: ${{ steps.generate_token.outputs.token }}
         run: |
-          pr_json=$(gh pr view ${{ env.PR_NUMBER }} --repo ${{ github.repository }} --json headRefName,headRepository,title,body,headRefOid,comments,reviews,closingIssuesReferences)
+          pr_json=$(gh pr view ${{ env.PR_NUMBER }} --repo ${{ github.repository }} --json author,headRefName,headRepository,title,body,headRefOid,comments,reviews,closingIssuesReferences)
           
-          # Set outputs for checkout and single-line env vars (this part is correct)
           echo "repo_full_name=$(echo "$pr_json" | jq -r .headRepository.nameWithOwner)" >> $GITHUB_OUTPUT
           echo "ref_name=$(echo "$pr_json" | jq -r .headRefName)" >> $GITHUB_OUTPUT
 
-          # Set environment variables for the prompt step
+          echo "PR_AUTHOR=$(echo "$pr_json" | jq -r .author.login)" >> $GITHUB_ENV
           echo "PR_TITLE=$(echo "$pr_json" | jq -r .title)" >> $GITHUB_ENV
           echo "PR_HEAD_SHA=$(echo "$pr_json" | jq -r .headRefOid)" >> $GITHUB_ENV
-          
-          # Safely set the multi-line PR body
           { echo "PR_BODY<<EOF"; echo "$pr_json" | jq -r .body; echo "EOF"; } >> "$GITHUB_ENV"
           
-          # --- Linked Issues Context (Two-Stage Fetch) ---
           {
             echo "LINKED_ISSUES_CONTEXT<<EOF"
-            # Get the list of issue numbers
-            issue_numbers=$(echo "$pr_json" | jq -r '.closingIssuesReferences[] | .number')
-
+            issue_numbers=$(echo "$pr_json" | jq -r '.closingIssuesReferences[].number')
             if [ -n "$issue_numbers" ]; then
-              # Loop through each issue number and fetch its details
               for num in $issue_numbers; do
                 issue_details=$(gh issue view "$num" --repo ${{ github.repository }} --json number,title,body)
-                echo "$issue_details" | jq -r '
-                  "<issue>\n" +
-                  "  <number>#\(.number)</number>\n" +
-                  "  <title>\(.title // "Title not available")</title>\n" +
-                  "  <body>\n\(.body // "Body not available")\n</body>\n" +
-                  "</issue>\n"'
+                echo "$issue_details" | jq -r '"<issue>\n <number>#\(.number)</number>\n <title>\(.title // "Title not available")</title>\n <body>\n\(.body // "Body not available")\n</body>\n</issue>\n"'
               done
             else
               echo "No issues are formally linked for closure by this PR."
             fi
             echo "EOF"
           } >> "$GITHUB_ENV"
+
+          timeline_data=$(gh api "/repos/${{ github.repository }}/issues/${{ env.PR_NUMBER }}/timeline")
+          references=$(echo "$timeline_data" | jq -r '.[] | select(.event == "cross-referenced") | .source.issue | " - Mentioned in \(.html_url | if contains("/pull/") then "PR" else "Issue" end): #\(.number) - \(.title)"')
+          {
+            echo "CROSS_REFERENCES<<EOF"
+            if [ -n "$references" ]; then
+              echo "$references"
+            else
+              echo "No other issues or PRs have mentioned this thread."
+            fi
+            echo "EOF"
+          } >> "$GITHUB_ENV"
           
-          # --- PR Comments and Reviews Context (with null protection) ---
           {
             echo "PR_CONTEXT<<EOF"
-            
-            # Format top-level comments
             if [ "$(echo "$pr_json" | jq '.comments | length')" -gt 0 ]; then
               echo "### General PR Comments"
-              # Use // to provide default values for potentially null fields
               echo "$pr_json" | jq -r '.comments[] | "Author: @\(.author.login // "unknown")\nDate: \(.createdAt // "N/A")\n\n\(.body // "")\n\n---\n"'
             fi
-
-            # Format formal reviews and their line-comments
             if [ "$(echo "$pr_json" | jq '.reviews | length')" -gt 0 ]; then
               echo "### Formal Code Reviews"
-              # Added robust null handling for all fields, especially review body and line comments
-              echo "$pr_json" | jq -r '.reviews[] | 
-                "Reviewer: @\(.author.login // "unknown")\nState: \(.state // "N/A")\nDate: \(.createdAt // "N/A")\n\n\(.body // "No summary comment.")\n" + 
-                (if .comments | length > 0 then "#### Line Comments in this Review:\n" + (.comments[] | "- **File:** \(.path) **Line:** \(.line)\n  - **Comment:** \(.body // "")\n") else "" end) +
-                "\n---\n"'
+              echo "$pr_json" | jq -r '.reviews[] | "Reviewer: @\(.author.login // "unknown")\nState: \(.state // "N/A")\nDate: \(.createdAt // "N/A")\n\n\(.body // "No summary comment.")\n" + (if .comments | length > 0 then "#### Line Comments in this Review:\n" + (.comments[] | "- **File:** \(.path) **Line:** \(.line)\n  - **Comment:** \(.body // "")\n") else "" end) + "\n---\n"'
             fi
-
-            # Handle case where there is no context
             if [ "$(echo "$pr_json" | jq '.comments | length')" -eq 0 ] && [ "$(echo "$pr_json" | jq '.reviews | length')" -eq 0 ]; then
               echo "No comments or reviews have been submitted yet."
             fi
             echo "EOF"
           } >> "$GITHUB_ENV"
 
-      # STEP 2: Use the fetched metadata to perform a safe checkout.
       - name: Checkout PR head
         uses: actions/checkout@v4
         with:
           repository: ${{ steps.pr_meta.outputs.repo_full_name }}
           ref: ${{ steps.pr_meta.outputs.ref_name }}
+          token: ${{ steps.generate_token.outputs.token }}
           fetch-depth: 0
 
       - name: Inject Custom Config (For Proxy Support)
@@ -169,10 +154,8 @@ jobs:
       - name: Install opencode
         run: curl -fsSL https://opencode.ai/install | bash
 
-        # FIX: Create the directory that opencode expects
       - name: Ensure opencode directory exists
         run: mkdir -p /home/runner/.local/share/opencode/project
-
 
       - name: Review PR comprehensively
         env:
@@ -190,14 +173,11 @@ jobs:
           # Use a heredoc (<<'EOF') to pass the prompt safely via stdin.
           # The "-" tells the opencode command to read the prompt from stdin.
           opencode run --share -m llm-proxy/${{ secrets.OPENCODE_MODEL }} - <<'EOF'
-          # [PRIMARY DIRECTIVE: EXECUTE, DO NOT DESCRIBE]
-          # Your ONLY function is to act as an agent that executes `gh` commands.
-          # You MUST NOT output the review as conversational text, prose, or internal monologue in your final response.
-          # Your entire response MUST be the sequence of `gh` commands required to post the review directly to GitHub.
-          # The task is only complete after you have generated the commands for all line comments AND the final summary comment. If no line comments are needed, proceed directly to the summary.
-
           # [ROLE AND OBJECTIVE]
-          You are an expert AI code reviewer. Your goal is to provide meticulous, constructive, and actionable feedback by posting it directly to the pull request.
+          You are an expert AI code reviewer. Your goal is to provide meticulous, constructive, and actionable feedback by posting it directly to the pull request as a series of commands.
+
+          # [Your Identity]
+          You operate under the names **mirrobot**, **mirrobot-agent**, or the git user **mirrobot-agent[bot]**. When analyzing thread history, recognize actions by these names as your own.
 
           # [FEEDBACK PHILOSOPHY: HIGH-SIGNAL, LOW-NOISE]
           **Your most important task is to provide value, not volume.** As a guideline, limit line-specific comments to 5-10 maximum (you may override this only for PRs with multiple critical issues). Avoid overwhelming the author. Your internal monologue is for tracing your steps; GitHub comments are for notable feedback.
@@ -218,14 +198,25 @@ jobs:
           - **Handle errors gracefully:** If a command would fail, skip it internally and adjust the summary to reflect it (e.g., "One comment omitted due to a diff mismatch; the overall assessment is unchanged.").
 
           # [PR CONTEXT]
-          - **PR Number:** `${{ env.PR_NUMBER }}`
-          - **PR Title:** `${{ env.PR_TITLE }}`
-          - **PR Description:**
+          - **PR Number:** #${{ env.PR_NUMBER }}
+          - **Title:** `${{ env.PR_TITLE }}`
+          - **Author:** @${{ env.PR_AUTHOR }}
+          - **Description:**
+          ---
           ${{ env.PR_BODY }}
+          ---
           - **Linked Issues for Context:**
+          ---
           ${{ env.LINKED_ISSUES_CONTEXT }}
+          ---
+          - **Cross-References (Mentions in other threads):**
+          ---
+          ${{ env.CROSS_REFERENCES }}
+          ---
           - **Existing Discussion (to avoid duplicating feedback):**
+          ---
           ${{ env.PR_CONTEXT }}
+          ---
 
           # [REVIEW GUIDELINES & CHECKLIST]
           Before writing any comments, you must first perform a thorough analysis based on these guidelines. This is your internal thought process—do not output it.
@@ -242,55 +233,55 @@ jobs:
               - **Documentation:** Are comments, docstrings, and external docs (`README.md`, etc.) updated accordingly?
               - **Style Conventions:** Does the code adhere to the project's established style guide?
 
-          # [ACTION PROTOCOL]
-          **CRITICAL:** You MUST deliver your review using the two commands defined below.
-          **Simulate Internally First:** Before outputting any command, mentally verify each parameter:
-            - Confirm file path exists in the repo.
-            - Ensure line number is valid in the PR diff.
-            - Validate `commit_id` matches `${{ env.PR_HEAD_SHA }}`. **(This SHA represents the latest, cumulative state of the PR and must be used for all comments).**
-            - Check body for correct structure (e.g., suggestion blocks where applicable).
-            - If invalid, skip the command and note internally: "Simulated failure on [param]; omitting to prevent error."
+          # [ACTION PROTOCOL & EXECUTION FLOW]
+          Your entire response MUST be the sequence of `gh` commands required to post the review. You must follow this three-step process:
 
-          **Action 1: Add Line-Specific Comments**
-          For each specific piece of feedback, execute this command (respecting the guideline limit from the philosophy).
+          **Step 1: Post Acknowledgment Comment**
+          Immediately provide feedback to the user that you are starting.
           ```bash
+          gh pr comment ${{ env.PR_NUMBER }} --repo ${{ github.repository }} --body "I'm beginning the code review now. I will post line-specific comments followed by a comprehensive summary."
+          ```
+
+          **Step 2: Add Line-Specific Comments (As Needed)**
+          For each specific piece of feedback, execute this command. Internally verify file paths and line numbers before generating the command. Use suggestion blocks (```suggestion\n...```) for code fixes.
+          ```bash
+          # Example for one line comment. Repeat for each point of feedback.
           gh api \
             --method POST \
             -H "Accept: application/vnd.github+json" \
             /repos/${{ github.repository }}/pulls/${{ env.PR_NUMBER }}/comments \
-            -f body='__YOUR_COMMENT_AND_SUGGESTION_HERE__' \
+            -f body='YOUR_COMMENT_HERE' \
             -f commit_id='${{ env.PR_HEAD_SHA }}' \
-            -f path='__FILE_PATH__' \
-            -F line=__LINE_NUMBER__ \
+            -f path='path/to/file.js' \
+            -F line=123 \
             -f side=RIGHT
           ```
-          - Use suggestion blocks in the body for code fixes: ```suggestion\nyour code here\n```
 
-          **Action 2: Post the Final Summary Comment**
-          After posting ALL line-specific comments, you MUST execute this command exactly once.
+          **Step 3: Post the Final Summary Comment**
+          After posting ALL line-specific comments (or if there are none), you MUST execute this command exactly once to provide a holistic overview.
           ```bash
-          gh pr comment ${{ env.PR_NUMBER }} --repo ${{ github.repository }} --body '__YOUR_SUMMARY_HERE__'
-          ```
-          - The summary body MUST follow this exact markdown structure:
-          '''
+          gh pr comment ${{ env.PR_NUMBER }} --repo ${{ github.repository }} --body - <<'EOF'
           ### Overall Assessment
-          *A brief, high-level summary of the pull request.*
+          *A brief, high-level summary of the pull request's quality and readiness.*
 
           ### Architectural Feedback
-          *Your high-level comments on the overall approach. If none, state "None."*
+          *High-level comments on the approach. If none, state "None."*
 
           ### Key Suggestions
-          - A bulleted list of your most important feedback points.
+          *A bulleted list of your most important feedback points from the line comments.*
 
           ### Nitpicks and Minor Points
-          - A separate section for smaller, optional suggestions (e.g., code style, typos). If none, state "None."
+          *Optional section for smaller suggestions. If none, state "None."*
 
           ### Questions for the Author
-          - A list of any clarifying questions. If none, state "None."
-          '''
+          *A list of any clarifying questions. If none, state "None."*
 
-          # [EXECUTION FLOW]
-          1.  Internally review the code against the **[REVIEW GUIDELINES & CHECKLIST]**, keeping the **[FEEDBACK PHILOSOPHY]** and PR scale in mind.
-          2.  For every finding that is **notable enough**, execute **Action 1** after internal simulation.
-          3.  Finally, execute **Action 2** to post your complete summary. Do not finish until this is done.
+          _This review was generated by an AI assistant._
+          EOF
+          ```
+          
+          # [TOOLS NOTE]
+          For multi-line bodies in the summary comment, you MUST use a heredoc (`<<'EOF'`) to prevent shell interpretation errors.
+
+          Now, analyze the PR context and code. Then, generate the full sequence of commands starting with Step 1.
           EOF
