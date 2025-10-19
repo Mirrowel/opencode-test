@@ -1,0 +1,333 @@
+name: Bot Reply on Mention
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  continuous-reply:
+    if: ${{ contains(github.event.comment.body, '@mirrobot') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    env:
+      THREAD_NUMBER: ${{ github.event.issue.number }}
+
+    steps:
+      - name: Generate GitHub App Token
+        id: generate_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
+
+      - name: Gather Full Thread Context
+        id: context
+        env:
+          GH_TOKEN: ${{ steps.generate_token.outputs.token }}
+        run: |
+          echo "NEW_COMMENT_AUTHOR=${{ github.event.comment.user.login }}" >> $GITHUB_ENV
+          { echo "NEW_COMMENT_BODY<<EOF"; echo "${{ github.event.comment.body }}"; echo "EOF"; } >> "$GITHUB_ENV"
+
+          IS_PR=$(gh issue view ${{ env.THREAD_NUMBER }} --json isPullRequest -q .isPullRequest)
+
+          if [[ "$IS_PR" == "true" ]]; then
+            echo "THREAD_TYPE=Pull Request" >> $GITHUB_ENV
+            echo "IS_PR=true" >> $GITHUB_OUTPUT
+            pr_data=$(gh pr view ${{ env.THREAD_NUMBER }} --json title,body,comments,reviews,headRefName,headRepository,headRefOid,closingIssuesReferences,timelineItems)
+            echo "repo_full_name=$(echo "$pr_data" | jq -r .headRepository.nameWithOwner)" >> $GITHUB_OUTPUT
+            echo "ref_name=$(echo "$pr_data" | jq -r .headRefName)" >> $GITHUB_OUTPUT
+            echo "PR_HEAD_SHA=$(echo "$pr_data" | jq -r .headRefOid)" >> $GITHUB_ENV
+            echo "THREAD_TITLE=$(echo "$pr_data" | jq -r .title)" >> $GITHUB_ENV
+            { echo "THREAD_BODY<<EOF"; echo "$pr_data" | jq -r .body; echo "EOF"; } >> $GITHUB_ENV
+            {
+              echo "LINKED_ISSUES_CONTEXT<<EOF"
+              issue_numbers=$(echo "$pr_data" | jq -r '.closingIssuesReferences[] | .number')
+              if [ -n "$issue_numbers" ]; then
+                for num in $issue_numbers; do
+                  issue_details=$(gh issue view "$num" --repo ${{ github.repository }} --json number,title,body)
+                  echo "$issue_details" | jq -r '"<issue>\n <number>#\(.number)</number>\n <title>\(.title // "Title not available")</title>\n <body>\n\(.body // "Body not available")\n</body>\n</issue>\n"'
+                done
+              else
+                echo "No issues are formally linked for closure by this PR."
+              fi
+              echo "EOF"
+            } >> "$GITHUB_ENV"
+            # NEW: Block to parse timeline for cross-references in PRs
+            {
+              echo "CROSS_REFERENCES<<EOF"
+              references=$(echo "$pr_data" | jq -r '.timelineItems[] | select(.__typename == "CrossReferenceEvent") | " - Mentioned in \(.source.__typename | sub("PullRequest"; "PR")): #\(.source.number) - \(.source.title)"')
+              if [ -n "$references" ]; then
+                echo "$references"
+              else
+                echo "No other issues or PRs have mentioned this thread."
+              fi
+              echo "EOF"
+            } >> "$GITHUB_ENV"
+            {
+              echo "THREAD_HISTORY<<EOF"
+              if [ "$(echo "$pr_data" | jq '.comments | length')" -gt 0 ]; then
+                echo "### General PR Comments"
+                echo "$pr_data" | jq -r '.comments[] | "Author: @\(.author.login // "unknown")\nDate: \(.createdAt // "N/A")\n\n\(.body // "")\n\n---\n"'
+              fi
+              if [ "$(echo "$pr_data" | jq '.reviews | length')" -gt 0 ]; then
+                echo "### Formal Code Reviews"
+                echo "$pr_data" | jq -r '.reviews[] | "Reviewer: @\(.author.login // "unknown")\nState: \(.state // "N/A")\nDate: \(.createdAt // "N/A")\n\n\(.body // "No summary comment.")\n" + (if .comments | length > 0 then "#### Line Comments in this Review:\n" + (.comments[] | "- **File:** \(.path) **Line:** \(.line)\n - **Comment:** \(.body // "")\n") else "" end) + "\n---\n"'
+              fi
+              if [ "$(echo "$pr_data" | jq '.comments | length')" -eq 0 ] && [ "$(echo "$pr_data" | jq '.reviews | length')" -eq 0 ]; then
+                echo "No comments or reviews have been submitted yet."
+              fi
+              echo "EOF"
+            } >> "$GITHUB_ENV"
+          else
+            echo "THREAD_TYPE=Issue" >> $GITHUB_ENV
+            echo "IS_PR=false" >> $GITHUB_OUTPUT
+            # MODIFICATION: Added 'timelineItems' to the JSON fields to fetch all events.
+            issue_data=$(gh issue view ${{ env.THREAD_NUMBER }} --json title,body,comments,timelineItems)
+            echo "THREAD_TITLE=$(echo "$issue_data" | jq -r .title)" >> $GITHUB_ENV
+            { echo "THREAD_BODY<<EOF"; echo "$issue_data" | jq -r .body; echo "EOF"; } >> $GITHUB_ENV
+            # NEW: Block to parse timeline for cross-references in Issues
+            {
+              echo "CROSS_REFERENCES<<EOF"
+              references=$(echo "$issue_data" | jq -r '.timelineItems[] | select(.__typename == "CrossReferenceEvent") | " - Mentioned in \(.source.__typename | sub("PullRequest"; "PR")): #\(.source.number) - \(.source.title)"')
+              if [ -n "$references" ]; then
+                echo "$references"
+              else
+                echo "No other issues or PRs have mentioned this thread."
+              fi
+              echo "EOF"
+            } >> "$GITHUB_ENV"
+            {
+              echo "THREAD_HISTORY<<EOF"
+              if [ "$(echo "$issue_data" | jq '.comments | length')" -gt 0 ]; then
+                echo "$(echo "$issue_data" | jq -r '.comments[] | "Author: @\(.author.login // "unknown")\nDate: \(.createdAt // "N/A")\n\n\(.body // "")\n\n---\n"')"
+              else
+                echo "No comments have been posted yet."
+              fi
+              echo "EOF"
+            } >> "$GITHUB_ENV"
+          fi
+
+      - name: Checkout PR head
+        if: steps.context.outputs.IS_PR == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.context.outputs.repo_full_name }}
+          ref: ${{ steps.context.outputs.ref_name }}
+          fetch-depth: 0
+
+      - name: Checkout repository (for issues)
+        if: steps.context.outputs.IS_PR == 'false'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git for Bot
+        if: steps.context.outputs.IS_PR == 'true'
+        env:
+          GH_TOKEN: ${{ steps.generate_token.outputs.token }}
+        run: |
+          git config --global user.name "${{ secrets.BOT_USERNAME }}"
+          git config --global user.email "${{ secrets.BOT_USERNAME }}@users.noreply.github.com"
+          # This command ensures that any git push command uses the bot's app token for authentication
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Inject Custom Config (For Proxy Support)
+        run: |
+          mkdir -p ~/.config/opencode
+          CONFIG='{
+            "$schema": "https://opencode.ai/config.json",
+            "provider": {
+              "llm-proxy": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Proxy",
+                "options": {
+                  "baseURL": "${{ secrets.PROXY_BASE_URL }}",
+                  "apiKey": "${{ secrets.PROXY_API_KEY }}",
+                  "headers": {
+                    "User-Agent": "OpenCode/1.0",
+                    "X-Custom-Header": "your-value"
+                  }
+                },
+                "models": {
+                  "${{ secrets.OPENCODE_MODEL }}": {
+                    "name": "Custom Model",
+                    "limit": {
+                      "context": 262000,
+                      "output": 64192
+                    }
+                  }
+                }
+              }
+            },
+            "autoupdate": true
+          }'
+          echo "$CONFIG" > ~/.config/opencode/opencode.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-3.12-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-3.12
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install opencode
+        run: curl -fsSL https://opencode.ai/install | bash
+
+      - name: Ensure opencode directory exists
+        run: mkdir -p /home/runner/.local/share/opencode/project
+
+      - name: Analyze comment and respond
+        env:
+          OPENCODE_API_KEY: ${{ secrets.PROXY_API_KEY }}
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
+          OPENCODE_PERMISSION: |
+            {
+              "bash": {
+                "gh*": "allow",
+                "git*": "allow"
+              },
+              "webfetch": "deny"
+            }
+        run: |
+          opencode run --share -m llm-proxy/${{ secrets.OPENCODE_MODEL }} - <<'EOF'
+          # [ROLE & OBJECTIVE]
+          You are an expert AI software engineer, acting as a principal-level collaborator. You have been mentioned in a GitHub discussion to provide assistance. Your function is to analyze the user's request in the context of the entire thread, autonomously select the appropriate strategy and tools, and execute the plan by generating the required `bash` commands. Your entire response MUST be only the sequence of commands.
+
+          # [THREAD CONTEXT]
+          - **Thread Type:** `${{ env.THREAD_TYPE }}` #${{ env.THREAD_NUMBER }}
+          - **Title:** `${{ env.THREAD_TITLE }}`
+          - **Original Description:**
+          ---
+          ${{ env.THREAD_BODY }}
+          ---
+          - **Linked Issues (if PR):**
+          ${{ env.LINKED_ISSUES_CONTEXT }}
+          - **Cross-References (Mentions in other threads):**
+          ---
+          ${{ env.CROSS_REFERENCES }}
+          ---
+          - **Full Conversation History:**
+          ---
+          ${{ env.THREAD_HISTORY }}
+          ---
+
+          # [USER'S LATEST REQUEST]
+          The user **@${{ env.NEW_COMMENT_AUTHOR }}** has just tagged you with the following request. This is the central task you must address:
+          <new-request-from-user>
+          ${{ env.NEW_COMMENT_BODY }}
+          </new-request-from-user>
+
+          # [AI'S INTERNAL MONOLOGUE & STRATEGY SELECTION]
+          1.  **Analyze Context & Intent:** First, determine your context (**Issue** or **Pull Request**). Then, analyze the `<new-request-from-user>` to understand the true intent. Vague requests require you to infer the most helpful action. Crucially, review the **Cross-References** to see if this thread is a duplicate or is discussed elsewhere.
+              - **Example 1:** If the request is `"@mirrobot is this ready?"`
+                  - **On a PR:** The intent is a readiness check, which REQUIRES a **Full Code Review (Tool 3)**.
+                  - **On an Issue:** The intent is a status check, which REQUIRES an **Investigation (Tool 2)** to find linked PRs and check the status from the **Cross-References**.
+              - **Example 2:** If you see in the **Cross-References** that this issue is mentioned in another, recently closed issue, you should investigate if it is a duplicate.
+          2.  **Formulate a Plan:** Based on your analysis, choose one or more tools from the **[COMPREHENSIVE TOOLKIT]**. Your plan is the sequence of commands you will generate.
+          3.  **Execute:** Generate the final sequence of `bash` commands. Do not add any conversational text outside of the command bodies.
+
+          # [FEEDBACK PHILOSOPHY: HIGH-SIGNAL, LOW-NOISE]
+          When reviewing code, your priority is value, not volume.
+          - **Prioritize:** Bugs, security flaws, architectural improvements, and logic errors.
+          - **Avoid:** Trivial style nits, already-discussed points (check history and cross-references), and commenting on perfectly acceptable code.
+
+          # [COMPREHENSIVE TOOLKIT]
+          ---
+          ### Tool 1: The Conversationalist (Simple Response)
+          **When to use:** For answering direct questions, providing status updates after an investigation, or when no other tool is appropriate.
+          **Behavior:** Posts a single, helpful comment. Always @mention the user who tagged you.
+          **Command:**
+          ```bash
+          gh issue comment ${{ env.THREAD_NUMBER }} --body "@${{ env.NEW_COMMENT_AUTHOR }}, [Your clear, concise response here.]
+
+          _This response was generated by an AI assistant._"
+          ```
+          ---
+          ### Tool 2: The Investigator (Deep Analysis)
+          **When to use:** When asked to analyze a bug, find a root cause, or check the status of an issue.
+          **Behavior:** You have two modes of investigation. You can use shell commands to explore the codebase and then report your findings in a structured comment.
+          1.  **Code-Level Investigation:** Use `git grep`, `git log`, `ls -R`, and `git blame` to understand the code.
+          2.  **Repository-Level Investigation (for Issues):** Use `gh issue view ${{ env.THREAD_NUMBER }} --json linkedPullRequests` or search commit logs (`git log --grep="#${{ env.THREAD_NUMBER }}"`) to find related work.
+          **Command:**
+          ```bash
+          # First, run your investigation commands (these will be executed but not printed to chat)
+          # git grep "error string"
+          # gh issue view ${{ env.THREAD_NUMBER }} --json linkedPullRequests
+
+          # Then, generate the command to post your structured findings
+          gh issue comment ${{ env.THREAD_NUMBER }} --body "@${{ env.NEW_COMMENT_AUTHOR }}, I have completed my investigation.
+
+          **Summary:** [A one-sentence overview of your findings.]
+          **Analysis:** [A detailed explanation of the root cause or the status of linked PRs, with supporting evidence.]
+          **Proposed Next Steps:** [Actionable plan for resolution.]
+
+          _This analysis was generated by an AI assistant._"
+          ```
+          ---
+          ### Tool 3: The Code Reviewer (Pull Requests Only)
+          **When to use:** When explicitly asked to review a PR, or when a vague question like "is this ready?" implies a review is needed.
+          **Behavior:** You are expected to post **multiple, fine-grained line comments** for specific feedback, followed by **one final summary comment**. This is not a single action, but a sequence of commands.
+          **Commands:**
+          ```bash
+          # 1. (As needed) Generate a command for EACH piece of line-specific feedback.
+          gh api --method POST -H "Accept: application/vnd.github+json" /repos/${{ github.repository }}/pulls/${{ env.THREAD_NUMBER }}/comments -f body='[Your specific comment. Use ```suggestion\nnew code\n``` for fixes.]' -f commit_id='${{ env.PR_HEAD_SHA }}' -f path='[path/to/file]' -F line=[line_number] -f side=RIGHT
+
+          # 2. (Required) After ALL line comments, generate the final summary comment.
+          gh pr comment ${{ env.THREAD_NUMBER }} --body "@${{ env.NEW_COMMENT_AUTHOR }}, I have completed the code review.
+
+          ### Overall Assessment
+          [A brief, high-level summary of the PR's quality and readiness.]
+
+          ### Architectural Feedback
+          [High-level comments on the approach, or 'None.']
+
+          ### Key Suggestions
+          - [Bulleted list of your most important feedback points from the line comments.]
+
+          ### Nitpicks and Minor Points
+          - [Optional section for smaller suggestions, or 'None.']
+          
+          ### Questions for the Author
+          [Bullets or 'None.']
+
+          _This review was generated by an AI assistant._"
+          ```
+          ---
+          ### Tool 4: The Code Contributor (Pull Requests Only)
+          **When to use:** ONLY when the user explicitly asks you to write, modify, or commit code (e.g., "please apply this fix," "add the documentation for this").
+          **Behavior:** You will generate the full sequence of commands to modify files, commit the changes, push to the branch, and finally, notify the user.
+          **Commands:**
+          ```bash
+          # 1. Modify files.
+          sed -i 's/old_code/new_code/' path/to/file.py
+
+          # 2. Stage changes.
+          git add path/to/file.py
+
+          # 3. Commit changes.
+          git commit -m "feat: Implement change as requested by @${{ env.NEW_COMMENT_AUTHOR }}"
+
+          # 4. Push to the PR's branch.
+          git push origin ${{ steps.context.outputs.ref_name }}
+
+          # 5. CRITICAL: Notify the user that the action is complete.
+          gh pr comment ${{ env.THREAD_NUMBER }} --body "@${{ env.NEW_COMMENT_AUTHOR }}, I have implemented the requested changes and pushed a new commit. Please review the updates.
+
+          _This update was generated by an AI assistant._"
+          ```
+          ---
+          Now, based on the user's request, context, and history, generate the exact sequence of `bash` commands to fulfill your mission.
+          EOF
