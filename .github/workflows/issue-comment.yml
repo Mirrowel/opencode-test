@@ -220,7 +220,7 @@ jobs:
           **Step 3: Post Final Analysis Comment**
           After your internal investigation, post a single, well-formatted comment summarizing your findings. Use the command below, filling in the sections based on your analysis.
           ```bash
-          gh issue comment ${{ env.ISSUE_NUMBER }} --body - <<'EOF'
+          gh issue comment ${{ env.ISSUE_NUMBER }} <<'EOF'
           ### Initial Analysis Report
 
           **Summary:** [A one-sentence overview of your findings.]
@@ -236,7 +236,7 @@ jobs:
           ```
 
           # [TOOLS NOTE]
-          When using `bash` to execute commands with a `--body` flag (like `gh issue comment`), the safest method for multi-line content is to use a heredoc (`<<'EOF'`). This prevents the shell from misinterpreting special characters.
+          When using `bash` to execute `gh issue comment` with multi-line content, omit the `--body` flag and use a heredoc (`<<'EOF'`). This correctly pipes the content to the command.
 
           Now, execute the plan. Start with Step 1.
           END_OF_PROMPT
