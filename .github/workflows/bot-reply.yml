@@ -81,8 +81,35 @@ jobs:
             reviews=$(echo "$pr_json" | jq -r 'if (.reviews | length) > 0 then (.reviews[] | select(.author.login != "ellipsis-dev" and .body != null and .state != "COMMENTED") | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n - Review body: \(.body // "No summary comment.")\n - State: \(.state // "UNKNOWN")\n") else "No formal reviews." end')
             # Prepare review comments (group by pull_request_review_id, exclude ellipsis-dev)
             review_comments=$(echo "$review_comments_json" | jq -r 'if (length > 0) then (.[] | select(.user.login != "ellipsis-dev") | .pull_request_review_id as $review_id | "- \(.user.login // "unknown") (Review ID: \($review_id // "N/A")) at \(.created_at // "N/A"):\n - Inline Comment: \(.path):\(.line // "N/A"):\n   \(.body // "")\n") else "No inline review comments." end')
-            # Prepare linked issues
-            linked_issues=$(echo "$pr_json" | jq -r 'if (.closingIssuesReferences | length) > 0 then .closingIssuesReferences[] | "<issue>\n <number>#\(.number)</number>\n <title>\(.title // "Title not available")</title>\n <body>\n\(.body // "Body not available")\n</body>\n</issue>\n" else "No issues are formally linked for closure by this PR." end')
+
+            # Prepare linked issues robustly by fetching each one individually.
+            linked_issues_content=""
+            issue_numbers=$(echo "$pr_json" | jq -r '.closingIssuesReferences[].number')
+
+            if [ -z "$issue_numbers" ]; then
+              linked_issues="No issues are formally linked for closure by this PR."
+            else
+              for number in $issue_numbers; do
+                # Fetch each issue's data separately. This is more reliable for cross-repo issues or permission nuances.
+                issue_details_json=$(gh issue view "$number" --repo "${{ github.repository }}" --json title,body 2>/dev/null || echo "{}")
+                
+                issue_title=$(echo "$issue_details_json" | jq -r '.title // "Title not available"')
+                issue_body=$(echo "$issue_details_json" | jq -r '.body // "Body not available"')
+                
+                linked_issues_content+=$(cat <<EOF
+                <issue>
+                <number>#${number}</number>
+                <title>${issue_title}</title>
+                <body>
+                ${issue_body}
+                </body>
+                </issue>
+                EOF
+                )
+              done
+              linked_issues=$linked_issues_content
+            fi
+            
             # Step 1: Write the header for the multi-line environment variable
             echo "THREAD_CONTEXT<<$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
             # Step 2: Append the content line by line
