@@ -24,6 +24,13 @@ jobs:
       pull-requests: read
       id-token: write
     steps:
+
+      - name: Generate GitHub App Token
+        id: generate_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -84,6 +91,8 @@ jobs:
         uses: sst/opencode/github@latest
         env:
           OPENCODE_API_KEY: ${{ secrets.PROXY_API_KEY }}
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
         with:
           model: llm-proxy/${{ secrets.OPENCODE_MODEL }}
           share: true
+          token: ${{ steps.generate_token.outputs.token }}
