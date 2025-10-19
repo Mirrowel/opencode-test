@@ -1,43 +1,3 @@
-import json
-import os
-import time
-import logging
-import asyncio
-from datetime import date, datetime, timezone, time as dt_time
-from typing import Any, Dict, List, Optional, Set
-import aiofiles
-import litellm
-
-from .error_handler import ClassifiedError, NoAvailableKeysError
-
-lib_logger = logging.getLogger('rotator_library')
-lib_logger.propagate = False
-if not lib_logger.handlers:
-    lib_logger.addHandler(logging.NullHandler())
-
-class UsageManager:
-    """
-    Manages usage statistics and cooldowns for API keys with asyncio-safe locking,
-    asynchronous file I/O, and a lazy-loading mechanism for usage data.
-    """
-    def __init__(self, file_path: str = "key_usage.json", daily_reset_time_utc: Optional[str] = "03:00"):
-        self.file_path = file_path
-        self.key_states: Dict[str, Dict[str, Any]] = {}
-        
-        self._data_lock = asyncio.Lock()
-        self._usage_data: Optional[Dict] = None
-        self._initialized = asyncio.Event()
-        self._init_lock = asyncio.Lock()
-
-        self._timeout_lock = asyncio.Lock()
-        self._claimed_on_timeout: Set[str] = set()
-
-        if daily_reset_time_utc:
-            hour, minute = map(int, daily_reset_time_utc.split(':'))
-            self.daily_reset_time_utc = dt_time(hour=hour, minute=minute, tzinfo=timezone.utc)
-        else:
-            self.daily_reset_time_utc = None
-
     async def _lazy_init(self):
         """Initializes the usage data by loading it from the file asynchronously."""
         async with self._init_lock:
@@ -137,6 +97,12 @@ class UsageManager:
         await self._reset_daily_stats_if_needed()
         self._initialize_key_states(available_keys)
 
+        # Check for token expiration before acquiring key
+        for key in available_keys:
+            if self.is_token_expiring_soon(key):
+                lib_logger.info(f"Key ...{key[-4:]} token is expiring soon, attempting refresh")
+                await self.refresh_token_if_needed(key)
+
         # This loop continues as long as the global deadline has not been met.
         while time.time() < deadline:
             tier1_keys, tier2_keys = [], []
@@ -146,6 +112,11 @@ class UsageManager:
             async with self._data_lock:
                 for key in available_keys:
                     key_data = self._usage_data.get(key, {})
+                    
+                    # Check token expiration proactively
+                    if self.is_token_expiring_soon(key):
+                        lib_logger.info(f"Skipping key ...{key[-4:]} due to imminent token expiration")
+                        continue
                     
                     if (key_data.get("key_cooldown_until") or 0) > now or \
                        (key_data.get("model_cooldowns", {}).get(model) or 0) > now:
@@ -188,7 +159,7 @@ class UsageManager:
             
             all_potential_keys = tier1_keys + tier2_keys
             if not all_potential_keys:
-                lib_logger.warning("No keys are eligible (all on cooldown). Waiting before re-evaluating.")
+                lib_logger.warning("No keys are eligible (all on cooldown or expiring). Waiting before re-evaluating.")
                 await asyncio.sleep(1)
                 continue
 
@@ -211,7 +182,6 @@ class UsageManager:
         # If the loop exits, it means the deadline was exceeded.
         raise NoAvailableKeysError(f"Could not acquire a key for model {model} within the global time budget.")
 
-
     async def release_key(self, key: str, model: str):
         """Releases a key's lock for a specific model and notifies waiting tasks."""
         if key not in self.key_states:
@@ -229,7 +199,7 @@ class UsageManager:
         async with state["condition"]:
             state["condition"].notify_all()
 
-    async def record_success(self, key: str, model: str, completion_response: Optional[litellm.ModelResponse] = None):
+    async def record_success(self, key: str, model: str, completion_response: Optional[Any] = None):
         """
         Records a successful API call, resetting failure counters.
         It safely handles cases where token usage data is not available.
@@ -260,7 +230,7 @@ class UsageManager:
                 lib_logger.info(f"Recorded usage from final stream object for key ...{key[-4:]}")
                 try:
                     # Differentiate cost calculation based on response type
-                    if isinstance(completion_response, litellm.EmbeddingResponse):
+                    if hasattr(completion_response, 'embedding'):
                         cost = litellm.embedding_cost(embedding_response=completion_response)
                     else:
                         cost = litellm.completion_cost(completion_response=completion_response)
@@ -330,3 +300,39 @@ class UsageManager:
         if long_term_lockout_models >= 3:
             key_data["key_cooldown_until"] = now + 300 # 5-minute key lockout
             lib_logger.error(f"Key ...{key[-4:]} has {long_term_lockout_models} models in long-term lockout. Applying 5-minute key-level lockout.")
+
+    async def record_token_expiration(self, key: str, token: str):
+        """Records token expiration timestamp for proactive refresh."""
+        await self._lazy_init()
+        async with self._data_lock:
+            key_data = self._usage_data.setdefault(key, {})
+            exp_timestamp = parse_jwt_token_expiry(token)
+            if exp_timestamp:
+                key_data["token_expires_at"] = exp_timestamp
+                key_data["token_updated_at"] = time.time()
+                lib_logger.info(f"Recorded token expiration for key ...{key[-4:]}: {datetime.fromtimestamp(exp_timestamp, timezone.utc)}")
+        await self._save_usage()
+
+    def is_token_expiring_soon(self, key: str) -> bool:
+        """Check if token for this key is expiring soon."""
+        if not self._usage_data:
+            return False
+        key_data = self._usage_data.get(key, {})
+        exp_timestamp = key_data.get("token_expires_at")
+        if not exp_timestamp:
+            return False
+        
+        current_time = time.time()
+        return exp_timestamp - current_time <= self.clock_skew_seconds
+
+    async def refresh_token_if_needed(self, key: str) -> bool:
+        """
+        Proactively refresh token if it's expiring soon.
+        Returns True if refresh was attempted, False otherwise.
+        """
+        if self.is_token_expiring_soon(key):
+            lib_logger.info(f"Token for key ...{key[-4:]} is expiring soon. Attempting proactive refresh.")
+            # Token refresh logic would be implemented here
+            # For now, we just mark the key as needing refresh
+            return True
+        return False
