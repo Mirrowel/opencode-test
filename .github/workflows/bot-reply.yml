@@ -32,7 +32,15 @@ jobs:
           echo "NEW_COMMENT_AUTHOR=${{ github.event.comment.user.login }}" >> $GITHUB_ENV
           { echo "NEW_COMMENT_BODY<<EOF"; echo "${{ github.event.comment.body }}"; echo "EOF"; } >> "$GITHUB_ENV"
 
-          IS_PR=$(gh issue view ${{ env.THREAD_NUMBER }} --json isPullRequest -q .isPullRequest)
+          # --- FIX: Use the event payload to determine if the context is a PR ---
+          # This is more reliable than the gh issue view command that was causing the error.
+          # It checks if the 'pull_request' key exists in the event's issue context.
+          if [ -n '${{ github.event.issue.pull_request }}' ]; then
+            IS_PR="true"
+          else
+            IS_PR="false"
+          fi
+          # --- END FIX ---
 
           if [[ "$IS_PR" == "true" ]]; then
             echo "THREAD_TYPE=Pull Request" >> $GITHUB_ENV
@@ -45,7 +53,7 @@ jobs:
             { echo "THREAD_BODY<<EOF"; echo "$pr_data" | jq -r .body; echo "EOF"; } >> $GITHUB_ENV
             {
               echo "LINKED_ISSUES_CONTEXT<<EOF"
-              issue_numbers=$(echo "$pr_data" | jq -r '.closingIssuesReferences[] | .number')
+              issue_numbers=$(echo "$pr_data" | jq -r '.closingIssuesReferences[].number')
               if [ -n "$issue_numbers" ]; then
                 for num in $issue_numbers; do
                   issue_details=$(gh issue view "$num" --repo ${{ github.repository }} --json number,title,body)
@@ -56,7 +64,6 @@ jobs:
               fi
               echo "EOF"
             } >> "$GITHUB_ENV"
-            # NEW: Block to parse timeline for cross-references in PRs
             {
               echo "CROSS_REFERENCES<<EOF"
               references=$(echo "$pr_data" | jq -r '.timelineItems[] | select(.__typename == "CrossReferenceEvent") | " - Mentioned in \(.source.__typename | sub("PullRequest"; "PR")): #\(.source.number) - \(.source.title)"')
@@ -85,11 +92,9 @@ jobs:
           else
             echo "THREAD_TYPE=Issue" >> $GITHUB_ENV
             echo "IS_PR=false" >> $GITHUB_OUTPUT
-            # MODIFICATION: Added 'timelineItems' to the JSON fields to fetch all events.
             issue_data=$(gh issue view ${{ env.THREAD_NUMBER }} --json title,body,comments,timelineItems)
             echo "THREAD_TITLE=$(echo "$issue_data" | jq -r .title)" >> $GITHUB_ENV
-            { echo "THREAD_BODY<<EOF"; echo "$issue_data" | jq -r .body; echo "EOF"; } >> $GITHUB_ENV
-            # NEW: Block to parse timeline for cross-references in Issues
+            { echo "THREAD_BODY<<EOF"; echo "$issue_data" | jq -r .body; echo "EOF"; } >> "$GITHUB_ENV"
             {
               echo "CROSS_REFERENCES<<EOF"
               references=$(echo "$issue_data" | jq -r '.timelineItems[] | select(.__typename == "CrossReferenceEvent") | " - Mentioned in \(.source.__typename | sub("PullRequest"; "PR")): #\(.source.number) - \(.source.title)"')
