@@ -4,7 +4,7 @@ import time
 import logging
 import asyncio
 from datetime import date, datetime, timezone, time as dt_time
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Union
 import aiofiles
 import litellm
 
@@ -142,8 +142,12 @@ class UsageManager:
             tier1_keys, tier2_keys = [], []
             now = time.time()
             
-            # First, filter the list of available keys to exclude any on cooldown.
+            # Use a single global lock for atomic key selection to prevent race conditions
             async with self._data_lock:
+                if self._usage_data is None:
+                    continue
+                    
+                # First, filter the list of available keys to exclude any on cooldown.
                 for key in available_keys:
                     key_data = self._usage_data.get(key, {})
                     
@@ -162,26 +166,35 @@ class UsageManager:
                     elif model not in key_state["models_in_use"]:
                         tier2_keys.append((key, usage_count))
 
-            tier1_keys.sort(key=lambda x: x[1])
-            tier2_keys.sort(key=lambda x: x[1])
+                tier1_keys.sort(key=lambda x: x[1])
+                tier2_keys.sort(key=lambda x: x[1])
 
-            # Attempt to acquire a key from Tier 1 first.
-            for key, _ in tier1_keys:
-                state = self.key_states[key]
-                async with state["lock"]:
-                    if not state["models_in_use"]:
-                        state["models_in_use"].add(model)
-                        lib_logger.info(f"Acquired Tier 1 key ...{key[-4:]} for model {model}")
-                        return key
+                # Attempt to acquire a key from Tier 1 first.
+                for key, _ in tier1_keys:
+                    state = self.key_states[key]
+                    async with state["lock"]:
+                        if not state["models_in_use"]:
+                            state["models_in_use"].add(model)
+                            lib_logger.info(f"Acquired Tier 1 key ...{key[-4:]} for model {model}")
+                            return key
 
-            # If no Tier 1 keys are available, try Tier 2.
-            for key, _ in tier2_keys:
-                state = self.key_states[key]
-                async with state["lock"]:
-                    if model not in state["models_in_use"]:
-                        state["models_in_use"].add(model)
-                        lib_logger.info(f"Acquired Tier 2 key ...{key[-4:]} for model {model}")
-                        return key
+                # If no Tier 1 keys are available, try Tier 2.
+                for key, _ in tier2_keys:
+                    state = self.key_states[key]
+                    async with state["lock"]:
+                        if model not in state["models_in_use"]:
+                            state["models_in_use"].add(model)
+                            lib_logger.info(f"Acquired Tier 2 key ...{key[-4:]} for model {model}")
+                            return key
+
+                # If no Tier 1 keys are available, try Tier 2.
+                for key, _ in tier2_keys:
+                    state = self.key_states[key]
+                    async with state["lock"]:
+                        if model not in state["models_in_use"]:
+                            state["models_in_use"].add(model)
+                            lib_logger.info(f"Acquired Tier 2 key ...{key[-4:]} for model {model}")
+                            return key
 
             # If all eligible keys are locked, wait for a key to be released.
             lib_logger.info("All eligible keys are currently locked for this model. Waiting...")
@@ -229,12 +242,14 @@ class UsageManager:
         async with state["condition"]:
             state["condition"].notify_all()
 
-    async def record_success(self, key: str, model: str, completion_response: Optional[litellm.ModelResponse] = None):
+    async def record_success(self, key: str, model: str, completion_response: Optional[Any] = None):
         """
         Records a successful API call, resetting failure counters.
         It safely handles cases where token usage data is not available.
         """
         await self._lazy_init()
+        if self._usage_data is None:
+            return
         async with self._data_lock:
             today_utc_str = datetime.now(timezone.utc).date().isoformat()
             key_data = self._usage_data.setdefault(key, {"daily": {"date": today_utc_str, "models": {}}, "global": {"models": {}}, "model_cooldowns": {}, "failures": {}})
@@ -260,10 +275,22 @@ class UsageManager:
                 lib_logger.info(f"Recorded usage from final stream object for key ...{key[-4:]}")
                 try:
                     # Differentiate cost calculation based on response type
-                    if isinstance(completion_response, litellm.EmbeddingResponse):
-                        cost = litellm.embedding_cost(embedding_response=completion_response)
+                    if hasattr(completion_response, '__class__') and 'EmbeddingResponse' in str(completion_response.__class__):
+                        try:
+                            if hasattr(litellm.cost_calculator, 'completion_cost'):
+                                cost = litellm.cost_calculator.completion_cost(completion_response=completion_response)
+                            else:
+                                cost = None
+                        except (AttributeError, TypeError):
+                            cost = None
                     else:
-                        cost = litellm.completion_cost(completion_response=completion_response)
+                        try:
+                            if hasattr(litellm.cost_calculator, 'completion_cost'):
+                                cost = litellm.cost_calculator.completion_cost(completion_response=completion_response)
+                            else:
+                                cost = None
+                        except (AttributeError, TypeError):
+                            cost = None
                     
                     if cost is not None:
                         daily_model_data["approx_cost"] += cost
@@ -279,6 +306,8 @@ class UsageManager:
     async def record_failure(self, key: str, model: str, classified_error: ClassifiedError):
         """Records a failure and applies cooldowns based on an escalating backoff strategy."""
         await self._lazy_init()
+        if self._usage_data is None:
+            return
         async with self._data_lock:
             today_utc_str = datetime.now(timezone.utc).date().isoformat()
             key_data = self._usage_data.setdefault(key, {"daily": {"date": today_utc_str, "models": {}}, "global": {"models": {}}, "model_cooldowns": {}, "failures": {}})
