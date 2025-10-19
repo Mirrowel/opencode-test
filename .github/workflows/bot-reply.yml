@@ -34,7 +34,6 @@ jobs:
           # Use a unique delimiter for safety
           COMMENT_DELIMITER="GH_BODY_DELIMITER_$(openssl rand -hex 8)"
           { echo "NEW_COMMENT_BODY<<$COMMENT_DELIMITER"; echo "${{ github.event.comment.body }}"; echo "$COMMENT_DELIMITER"; } >> "$GITHUB_ENV"
-
           # Determine if PR or Issue
           if [ -n '${{ github.event.issue.pull_request }}' ]; then
             IS_PR="true"
@@ -42,22 +41,19 @@ jobs:
             IS_PR="false"
           fi
           echo "IS_PR=$IS_PR" >> $GITHUB_OUTPUT
-
           # Define a unique, random delimiter for the main context block
           CONTEXT_DELIMITER="GH_CONTEXT_DELIMITER_$(openssl rand -hex 8)"
-
           # Fetch and Format Context based on type
           if [[ "$IS_PR" == "true" ]]; then
             pr_json=$(gh pr view ${{ env.THREAD_NUMBER }} --repo ${{ github.repository }} --json author,title,body,createdAt,state,headRefName,baseRefName,headRefOid,additions,deletions,commits,files,comments,reviews,closingIssuesReferences)
-            
+           
             # For checkout step
             echo "repo_full_name=$(echo "$pr_json" | jq -r .headRepository.nameWithOwner)" >> $GITHUB_OUTPUT
             echo "ref_name=$(echo "$pr_json" | jq -r .headRefName)" >> $GITHUB_OUTPUT
-            
+           
             # For prompt context
             echo "PR_HEAD_SHA=$(echo "$pr_json" | jq -r .headRefOid)" >> $GITHUB_ENV
             echo "THREAD_AUTHOR=$(echo "$pr_json" | jq -r .author.login)" >> $GITHUB_ENV
-
             # Prepare all variables from JSON
             author=$(echo "$pr_json" | jq -r .author.login)
             created_at=$(echo "$pr_json" | jq -r .createdAt)
@@ -70,104 +66,83 @@ jobs:
             changed_files_count=$(echo "$pr_json" | jq -r '.files | length')
             title=$(echo "$pr_json" | jq -r .title)
             body=$(echo "$pr_json" | jq -r .body)
-
             # Prepare changed files list
             changed_files_list=$(echo "$pr_json" | jq -r '.files[] | "- \(.path) (MODIFIED) +\((.additions))/-((.deletions))"')
-
             # Prepare comments
             comments=$(echo "$pr_json" | jq -r 'if (.comments | length) > 0 then .comments[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n\(.body // "")\n" else "No general comments." end')
-
             # Prepare reviews
-            reviews=$(echo "$pr_json" | jq -r 'if (.reviews | length) > 0 then .reviews[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n  - Review body: \(.body // "No summary comment.")\n" + (if .comments.nodes | length > 0 then "  - Comments:\n" + (.comments.nodes[] | "    - \(.path):\(.line): \(.body // "")\n") else "" end) else "No formal reviews." end')
-            
+            reviews=$(echo "$pr_json" | jq -r 'if (.reviews | length) > 0 then .reviews[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n - Review body: \(.body // "No summary comment.")\n" + (if .comments.nodes | length > 0 then " - Comments:\n" + (.comments.nodes[] | " - \(.path):\(.line): \(.body // "")\n") else "" end) else "No formal reviews." end')
+           
             # Prepare linked issues
             linked_issues=$(echo "$pr_json" | jq -r 'if (.closingIssuesReferences.nodes | length) > 0 then .closingIssuesReferences.nodes[] | "<issue>\n <number>#\(.number)</number>\n <title>\(.title // "Title not available")</title>\n <body>\n\(.body // "Body not available")\n</body>\n</issue>\n" else "No issues are formally linked for closure by this PR." end')
-
             # Step 1: Write the header for the multi-line environment variable.
             echo "THREAD_CONTEXT<<$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
-
-            # Step 2: Stream the content directly into the environment file. This is safe.
-            cat <<EOF >> "$GITHUB_ENV"
-            Type: Pull Request
-            PR Number: #${{ env.THREAD_NUMBER }}
-            Title: $title
-            Author: $author
-            Created At: $created_at
-            Base Branch: $base_branch
-            Head Branch: $head_branch
-            State: $state
-            Additions: $additions
-            Deletions: $deletions
-            Total Commits: $total_commits
-            Changed Files: $changed_files_count files
-
-            <pull_request_body>
-            $body
-            </pull_request_body>
-
-            <pull_request_comments>
-            $comments
-            </pull_request_comments>
-
-            <pull_request_reviews>
-            $reviews
-            </pull_request_reviews>
-
-            <pull_request_changed_files>
-            $changed_files_list
-            </pull_request_changed_files>
-
-            <linked_issues>
-            $linked_issues
-            </linked_issues>
-            EOF
+            # Step 2: Append the content line by line. This avoids here-doc indentation issues.
+            echo "Type: Pull Request" >> "$GITHUB_ENV"
+            echo "PR Number: #${{ env.THREAD_NUMBER }}" >> "$GITHUB_ENV"
+            echo "Title: $title" >> "$GITHUB_ENV"
+            echo "Author: $author" >> "$GITHUB_ENV"
+            echo "Created At: $created_at" >> "$GITHUB_ENV"
+            echo "Base Branch: $base_branch" >> "$GITHUB_ENV"
+            echo "Head Branch: $head_branch" >> "$GITHUB_ENV"
+            echo "State: $state" >> "$GITHUB_ENV"
+            echo "Additions: $additions" >> "$GITHUB_ENV"
+            echo "Deletions: $deletions" >> "$GITHUB_ENV"
+            echo "Total Commits: $total_commits" >> "$GITHUB_ENV"
+            echo "Changed Files: $changed_files_count files" >> "$GITHUB_ENV"
+            echo "<pull_request_body>" >> "$GITHUB_ENV"
+            echo "$body" >> "$GITHUB_ENV"
+            echo "</pull_request_body>" >> "$GITHUB_ENV"
+            echo "<pull_request_comments>" >> "$GITHUB_ENV"
+            echo "$comments" >> "$GITHUB_ENV"
+            echo "</pull_request_comments>" >> "$GITHUB_ENV"
+            echo "<pull_request_reviews>" >> "$GITHUB_ENV"
+            echo "$reviews" >> "$GITHUB_ENV"
+            echo "</pull_request_reviews>" >> "$GITHUB_ENV"
+            echo "<pull_request_changed_files>" >> "$GITHUB_ENV"
+            echo "$changed_files_list" >> "$GITHUB_ENV"
+            echo "</pull_request_changed_files>" >> "$GITHUB_ENV"
+            echo "<linked_issues>" >> "$GITHUB_ENV"
+            echo "$linked_issues" >> "$GITHUB_ENV"
+            echo "</linked_issues>" >> "$GITHUB_ENV"
             # Step 3: Write the closing delimiter.
             echo "$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
             # --- END: ROBUST IMPLEMENTATION ---
-
           else # It's an Issue
             issue_data=$(gh issue view ${{ env.THREAD_NUMBER }} --repo ${{ github.repository }} --json author,title,body,createdAt,state,comments)
             timeline_data=$(gh api "/repos/${{ github.repository }}/issues/${{ env.THREAD_NUMBER }}/timeline")
             echo "THREAD_AUTHOR=$(echo "$issue_data" | jq -r .author.login)" >> $GITHUB_ENV
-
             # Prepare metadata
             author=$(echo "$issue_data" | jq -r .author.login)
             created_at=$(echo "$issue_data" | jq -r .createdAt)
             state=$(echo "$issue_data" | jq -r .state)
             title=$(echo "$issue_data" | jq -r .title)
             body=$(echo "$issue_data" | jq -r .body)
-
             # Prepare comments
             comments=$(echo "$issue_data" | jq -r 'if (.comments | length) > 0 then .comments[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n\(.body // "")\n" else "No comments have been posted yet." end')
-            
+           
             # Prepare cross-references
             references=$(echo "$timeline_data" | jq -r '.[] | select(.event == "cross-referenced") | .source.issue | "- Mentioned in \(.html_url | if contains("/pull/") then "PR" else "Issue" end): #\(.number) - \(.title)"')
             if [ -z "$references" ]; then references="No other issues or PRs have mentioned this thread."; fi
-            
+           
             # Step 1: Write the header.
             echo "THREAD_CONTEXT<<$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
-
-            # Step 2: Stream the content.
-            cat <<EOF >> "$GITHUB_ENV"
-            Type: Issue
-            Issue Number: #${{ env.THREAD_NUMBER }}
-            Title: $title
-            Author: $author
-            Created At: $created_at
-            State: $state
-
-            <issue_body>
-            $body
-            </issue_body>
-
-            <issue_comments>
-            $comments
-            </issue_comments>
-
-            <cross_references>
-            $references
-            </cross_references>
-            EOF
+            # Step 2: Append the content line by line. This avoids here-doc indentation issues.
+            echo "Type: Issue" >> "$GITHUB_ENV"
+            echo "Issue Number: #${{ env.THREAD_NUMBER }}" >> "$GITHUB_ENV"
+            echo "Title: $title" >> "$GITHUB_ENV"
+            echo "Author: $author" >> "$GITHUB_ENV"
+            echo "Created At: $created_at" >> "$GITHUB_ENV"
+            echo "State: $state" >> "$GITHUB_ENV"
+            echo "<issue_body>" >> "$GITHUB_ENV"
+            echo "$body" >> "$GITHUB_ENV"
+            echo "</issue_body>" >> "$GITHUB_ENV"
+            echo "<issue_comments>" >> "$GITHUB_ENV"
+            echo "$comments" >> "$GITHUB_ENV"
+            echo "</issue_comments>" >> "$GITHUB_ENV"
+            echo "<cross_references>" >> "$GITHUB_ENV"
+            echo "$references" >> "$GITHUB_ENV"
+            echo "</cross_references>" >> "$GITHUB_ENV"
             # Step 3: Write the footer.
             echo "$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
           fi
