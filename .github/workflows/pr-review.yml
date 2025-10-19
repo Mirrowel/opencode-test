@@ -36,62 +36,82 @@ jobs:
           git config --global user.email "${{ secrets.BOT_APP_ID }}+mirrobot-agent@users.noreply.github.com"
           git config --global url."https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/".insteadOf "https://github.com/"
 
-      - name: Fetch Full PR Metadata and Context
+      - name: Fetch and Format Full PR Context
         id: pr_meta
         env:
           GH_TOKEN: ${{ steps.generate_token.outputs.token }}
         run: |
-          pr_json=$(gh pr view ${{ env.PR_NUMBER }} --repo ${{ github.repository }} --json author,headRefName,headRepository,title,body,headRefOid,comments,reviews,closingIssuesReferences)
+          # Fetch all PR data, including new fields like files, commits, additions, etc.
+          pr_json=$(gh pr view ${{ env.PR_NUMBER }} --repo ${{ github.repository }} --json author,title,body,createdAt,state,headRefName,baseRefName,headRefOid,additions,deletions,commits,files,comments,reviews,closingIssuesReferences)
           
+          # For checkout step
           echo "repo_full_name=$(echo "$pr_json" | jq -r .headRepository.nameWithOwner)" >> $GITHUB_OUTPUT
           echo "ref_name=$(echo "$pr_json" | jq -r .headRefName)" >> $GITHUB_OUTPUT
 
-          echo "PR_AUTHOR=$(echo "$pr_json" | jq -r .author.login)" >> $GITHUB_ENV
-          echo "PR_TITLE=$(echo "$pr_json" | jq -r .title)" >> $GITHUB_ENV
-          echo "PR_HEAD_SHA=$(echo "$pr_json" | jq -r .headRefOid)" >> $GITHUB_ENV
-          { echo "PR_BODY<<EOF"; echo "$pr_json" | jq -r .body; echo "EOF"; } >> "$GITHUB_ENV"
-          
-          {
-            echo "LINKED_ISSUES_CONTEXT<<EOF"
-            issue_numbers=$(echo "$pr_json" | jq -r '.closingIssuesReferences[].number')
-            if [ -n "$issue_numbers" ]; then
-              for num in $issue_numbers; do
-                issue_details=$(gh issue view "$num" --repo ${{ github.repository }} --json number,title,body)
-                echo "$issue_details" | jq -r '"<issue>\n <number>#\(.number)</number>\n <title>\(.title // "Title not available")</title>\n <body>\n\(.body // "Body not available")\n</body>\n</issue>\n"'
-              done
-            else
-              echo "No issues are formally linked for closure by this PR."
-            fi
-            echo "EOF"
-          } >> "$GITHUB_ENV"
+          # Prepare metadata
+          author=$(echo "$pr_json" | jq -r .author.login)
+          created_at=$(echo "$pr_json" | jq -r .createdAt)
+          base_branch=$(echo "$pr_json" | jq -r .baseRefName)
+          head_branch=$(echo "$pr_json" | jq -r .headRefName)
+          state=$(echo "$pr_json" | jq -r .state)
+          additions=$(echo "$pr_json" | jq -r .additions)
+          deletions=$(echo "$pr_json" | jq -r .deletions)
+          total_commits=$(echo "$pr_json" | jq -r '.commits | length')
+          changed_files_count=$(echo "$pr_json" | jq -r '.files | length')
+          title=$(echo "$pr_json" | jq -r .title)
+          body=$(echo "$pr_json" | jq -r .body)
 
-          timeline_data=$(gh api "/repos/${{ github.repository }}/issues/${{ env.PR_NUMBER }}/timeline")
-          references=$(echo "$timeline_data" | jq -r '.[] | select(.event == "cross-referenced") | .source.issue | " - Mentioned in \(.html_url | if contains("/pull/") then "PR" else "Issue" end): #\(.number) - \(.title)"')
-          {
-            echo "CROSS_REFERENCES<<EOF"
-            if [ -n "$references" ]; then
-              echo "$references"
-            else
-              echo "No other issues or PRs have mentioned this thread."
-            fi
-            echo "EOF"
-          } >> "$GITHUB_ENV"
+          # Prepare changed files list
+          changed_files_list=$(echo "$pr_json" | jq -r '.files[] | "- \(.path) (MODIFIED) +\((.additions))/-((.deletions))"')
+
+          # Prepare comments
+          comments=$(echo "$pr_json" | jq -r 'if (.comments | length) > 0 then .comments[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n\(.body // "")\n" else "No general comments." end')
+
+          # Prepare reviews (more complex formatting)
+          reviews=$(echo "$pr_json" | jq -r 'if (.reviews | length) > 0 then .reviews[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n  - Review body: \(.body // "No summary comment.")\n" + (if .comments | length > 0 then "  - Comments:\n" + (.comments.nodes[] | "    - \(.path):\(.line): \(.body // "")\n") else "" end) else "No formal reviews." end')
           
-          {
-            echo "PR_CONTEXT<<EOF"
-            if [ "$(echo "$pr_json" | jq '.comments | length')" -gt 0 ]; then
-              echo "### General PR Comments"
-              echo "$pr_json" | jq -r '.comments[] | "Author: @\(.author.login // "unknown")\nDate: \(.createdAt // "N/A")\n\n\(.body // "")\n\n---\n"'
-            fi
-            if [ "$(echo "$pr_json" | jq '.reviews | length')" -gt 0 ]; then
-              echo "### Formal Code Reviews"
-              echo "$pr_json" | jq -r '.reviews[] | "Reviewer: @\(.author.login // "unknown")\nState: \(.state // "N/A")\nDate: \(.createdAt // "N/A")\n\n\(.body // "No summary comment.")\n" + (if .comments | length > 0 then "#### Line Comments in this Review:\n" + (.comments[] | "- **File:** \(.path) **Line:** \(.line)\n  - **Comment:** \(.body // "")\n") else "" end) + "\n---\n"'
-            fi
-            if [ "$(echo "$pr_json" | jq '.comments | length')" -eq 0 ] && [ "$(echo "$pr_json" | jq '.reviews | length')" -eq 0 ]; then
-              echo "No comments or reviews have been submitted yet."
-            fi
-            echo "EOF"
-          } >> "$GITHUB_ENV"
+          # Prepare linked issues
+          linked_issues=$(echo "$pr_json" | jq -r 'if (.closingIssuesReferences.nodes | length) > 0 then .closingIssuesReferences.nodes[] | "<issue>\n <number>#\(.number)</number>\n <title>\(.title // "Title not available")</title>\n <body>\n\(.body // "Body not available")\n</body>\n</issue>\n" else "No issues are formally linked for closure by this PR." end')
+
+          # Assemble the final context block
+          PR_CONTEXT=$(cat <<EOF
+          Author: $author
+          Created At: $created_at
+          Base Branch: $base_branch
+          Head Branch: $head_branch
+          State: $state
+          Additions: $additions
+          Deletions: $deletions
+          Total Commits: $total_commits
+          Changed Files: $changed_files_count files
+
+          <pull_request_body>
+          $title
+          ---
+          $body
+          </pull_request_body>
+
+          <pull_request_comments>
+          $comments
+          </pull_request_comments>
+
+          <pull_request_reviews>
+          $reviews
+          </pull_request_reviews>
+
+          <pull_request_changed_files>
+          $changed_files_list
+          </pull_request_changed_files>
+
+          <linked_issues>
+          $linked_issues
+          </linked_issues>
+          EOF
+          )
+          # Export for the next step
+          { echo "PULL_REQUEST_CONTEXT<<EOF"; echo "$PR_CONTEXT"; echo "EOF"; } >> "$GITHUB_ENV"
+          echo "PR_HEAD_SHA=$(echo "$pr_json" | jq -r .headRefOid)" >> $GITHUB_ENV
+          echo "PR_AUTHOR=$author" >> $GITHUB_ENV
 
       - name: Checkout PR head
         uses: actions/checkout@v4
@@ -190,43 +210,28 @@ jobs:
           **Do NOT comment on:**
           - **Trivial Style Preferences:** Avoid minor stylistic points that don't violate the project's explicit style guide. Trust linters for formatting.
           - **Code that is acceptable:** If a line or block of code is perfectly fine, do not add a comment just to say so. No comment implies approval.
-          - **Duplicates:** Explicitly cross-reference **[PR CONTEXT]**. If a point has already been raised by another reviewer, skip it entirely. Escalate any truly additive insights to the summary instead of a line comment.
+          - **Duplicates:** Explicitly cross-reference the discussion in `<pull_request_comments>` and `<pull_request_reviews>`. If a point has already been raised, skip it. Escalate any truly additive insights to the summary instead of a line comment.
 
           **Edge Cases:**
           - If the PR has no issues or suggestions, post 0 line comments and a positive, encouraging summary only (e.g., "This PR is exemplary and ready to merge as-is. Great work on [specific strength].").
           - **For large PRs (>500 lines changed or >10 files):** Focus on core changes or patterns; note in the summary: "Review scaled to high-impact areas due to PR size."
           - **Handle errors gracefully:** If a command would fail, skip it internally and adjust the summary to reflect it (e.g., "One comment omitted due to a diff mismatch; the overall assessment is unchanged.").
 
-          # [PR CONTEXT]
-          - **PR Number:** #${{ env.PR_NUMBER }}
-          - **Title:** `${{ env.PR_TITLE }}`
-          - **Author:** @${{ env.PR_AUTHOR }}
-          - **Description:**
-          ---
-          ${{ env.PR_BODY }}
-          ---
-          - **Linked Issues for Context:**
-          ---
-          ${{ env.LINKED_ISSUES_CONTEXT }}
-          ---
-          - **Cross-References (Mentions in other threads):**
-          ---
-          ${{ env.CROSS_REFERENCES }}
-          ---
-          - **Existing Discussion (to avoid duplicating feedback):**
-          ---
-          ${{ env.PR_CONTEXT }}
-          ---
-
+          # [PULL REQUEST CONTEXT]
+          This is the full context for the pull request you must review.
+          <pull_request>
+          ${{ env.PULL_REQUEST_CONTEXT }}
+          </pull_request>
+          
           # [REVIEW GUIDELINES & CHECKLIST]
           Before writing any comments, you must first perform a thorough analysis based on these guidelines. This is your internal thought process—do not output it.
-          1.  **Identify the Author:** First, check if the PR author (`@${{ env.PR_AUTHOR }}`) is one of your own identities (mirrobot, mirrobot-agent, mirrobot-agent[bot]). This check is crucial as it dictates your entire review style.
-          2.  **Assess PR Size and Complexity:** Internally estimate scale. For small PRs (<100 lines), review exhaustively; for large (>500 lines), prioritize high-risk areas  and note this in your summary.
-          2.  **Assess the High-Level Approach:**
+          1.  **Identify the Author:** First, check if the PR author (`${{ env.PR_AUTHOR }}`) is one of your own identities (mirrobot, mirrobot-agent, mirrobot-agent[bot]). This check is crucial as it dictates your entire review style.
+          2.  **Assess PR Size and Complexity:** Internally estimate scale. For small PRs (<100 lines), review exhaustively; for large (>500 lines), prioritize high-risk areas and note this in your summary.
+          3.  **Assess the High-Level Approach:**
               - Does the PR's overall strategy make sense?
               - Does it fit within the existing architecture? Is there a simpler way to achieve the goal?
               - Frame your feedback constructively. Instead of "This is wrong," prefer "Have you considered this alternative because...?"
-          3.  **Conduct a Detailed Code Analysis:** Evaluate all changes against the following criteria, cross-referencing **[PR CONTEXT]** to skip duplicates:
+          3.  **Conduct a Detailed Code Analysis:** Evaluate all changes against the following criteria, cross-referencing existing discussion to skip duplicates:
               - **Security:** Are there potential vulnerabilities (e.g., injection, improper error handling, dependency issues)?
               - **Performance:** Could any code introduce performance bottlenecks?
               - **Testing:** Are there sufficient tests for the new logic? If it's a bug fix, is there a regression test?

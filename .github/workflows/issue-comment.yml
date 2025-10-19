@@ -99,38 +99,57 @@ jobs:
       - name: Ensure opencode directory exists
         run: mkdir -p /home/runner/.local/share/opencode/project
 
-      # MODIFIED: This step now gathers author and cross-references for richer context.
-      - name: Fetch Full Issue Context
+      - name: Fetch and Format Full Issue Context
         id: issue_details
         env:
           GH_TOKEN: ${{ steps.generate_token.outputs.token }}
         run: |
-          issue_data=$(gh issue view ${{ env.ISSUE_NUMBER }} --json author,title,body,comments)
-          echo "ISSUE_AUTHOR=$(echo "$issue_data" | jq -r .author.login)" >> $GITHUB_ENV
-          echo "ISSUE_TITLE=$(echo "$issue_data" | jq -r .title)" >> $GITHUB_ENV
-          { echo "ISSUE_BODY<<EOF"; echo "$issue_data" | jq -r .body; echo "EOF"; } >> "$GITHUB_ENV"
-          {
-            echo "ISSUE_COMMENTS<<EOF"
-            if [ "$(echo "$issue_data" | jq '.comments | length')" -gt 0 ]; then
-              echo "$issue_data" | jq -r '.comments[] | "Author: @\(.author.login // "unknown")\nDate: \(.createdAt // "N/A")\n\n\(.body // "")\n\n---\n"'
-            else
-              echo "No comments have been posted yet."
-            fi
-            echo "EOF"
-          } >> "$GITHUB_ENV"
-
-          # NEW: Fetch cross-references from the timeline API
+          # Fetch all necessary data in one call
+          issue_data=$(gh issue view ${{ env.ISSUE_NUMBER }} --json author,title,body,createdAt,state,comments)
           timeline_data=$(gh api "/repos/${{ github.repository }}/issues/${{ env.ISSUE_NUMBER }}/timeline")
-          references=$(echo "$timeline_data" | jq -r '.[] | select(.event == "cross-referenced") | .source.issue | " - Mentioned in \(.html_url | if contains("/pull/") then "PR" else "Issue" end): #\(.number) - \(.title)"')
-          {
-            echo "CROSS_REFERENCES<<EOF"
-            if [ -n "$references" ]; then
-              echo "$references"
-            else
-              echo "No other issues or PRs have mentioned this thread."
-            fi
-            echo "EOF"
-          } >> "$GITHUB_ENV"
+
+          # Prepare metadata
+          author=$(echo "$issue_data" | jq -r .author.login)
+          created_at=$(echo "$issue_data" | jq -r .createdAt)
+          state=$(echo "$issue_data" | jq -r .state)
+          title=$(echo "$issue_data" | jq -r .title)
+          body=$(echo "$issue_data" | jq -r .body)
+
+          # Prepare comments
+          comments=$(echo "$issue_data" | jq -r 'if (.comments | length) > 0 then .comments[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n\(.body // "")\n" else "No comments have been posted yet." end')
+          
+          # Prepare cross-references
+          references=$(echo "$timeline_data" | jq -r '.[] | select(.event == "cross-referenced") | .source.issue | "- Mentioned in \(.html_url | if contains("/pull/") then "PR" else "Issue" end): #\(.number) - \(.title)"')
+          if [ -z "$references" ]; then
+            references="No other issues or PRs have mentioned this thread."
+          fi
+
+          # Assemble the final context block
+          ISSUE_CONTEXT=$(cat <<EOF
+          Issue: #${{ env.ISSUE_NUMBER }}
+          Title: $title
+          Author: $author
+          Created At: $created_at
+          State: $state
+
+          <issue_body>
+          $body
+          </issue_body>
+
+          <issue_comments>
+          $comments
+          </issue_comments>
+
+          <cross_references>
+          $references
+          </cross_references>
+          EOF
+          )
+          # Export to environment for the next step
+          { echo "ISSUE_CONTEXT<<EOF"; echo "$ISSUE_CONTEXT"; echo "EOF"; } >> "$GITHUB_ENV"
+          # Also export author for the acknowledgment comment
+          echo "ISSUE_AUTHOR=$author" >> $GITHUB_ENV
+
 
       - name: Analyze issue and suggest resolution
         env:
@@ -160,21 +179,10 @@ jobs:
           2.  **Summarize:** After the analysis is complete, post a second, detailed comment with your full findings. Do not expose internal thought processes or tool executions in your comments; keep the output clean and professional.
 
           # [ISSUE CONTEXT]
-          - **Issue Number:** #${{ env.ISSUE_NUMBER }}
-          - **Title:** `${{ env.ISSUE_TITLE }}`
-          - **Author:** @${{ env.ISSUE_AUTHOR }}
-          - **Description:**
-          ---
-          ${{ env.ISSUE_BODY }}
-          ---
-          - **Cross-References (Mentions in other threads):**
-          ---
-          ${{ env.CROSS_REFERENCES }}
-          ---
-          - **Existing Comments:**
-          ---
-          ${{ env.ISSUE_COMMENTS }}
-          ---
+          This is the full context for the issue you must analyze.
+          <issue_context>
+          ${{ env.ISSUE_CONTEXT }}
+          </issue_context>
 
           # [EXECUTION PLAN]
           First, post your acknowledgment, then begin your investigation.
@@ -204,8 +212,8 @@ jobs:
             - #[issue_number]: [brief description of similarity]
 
             If duplicates are found, stop further analysis.
-          2.  **Understand the Problem:** Read the title and description to grasp the problem. Identify the specific branch(es), files, or commit(s) mentioned.
-          3.  **Explore the Codebase:** Navigate the repository to find the most relevant files, configurations, or recent commits related to the issue. Utilize `git` and `gh` commands for this exploration. Navigate the repository to find the most relevant files. Use `git log --grep="<keyword>"` to find related commits, `git grep "<error_message>"` to search the codebase for error strings, and `git blame <file>` to inspect the history of suspicious files. Start by getting an overview of the project structure with `ls -R`.
+          2.  **Understand the Problem:** Read the title and description within the `<issue_context>` to grasp the problem.
+          3.  **Explore the Codebase:** Navigate the repository to find the most relevant files, configurations, or recent commits related to the issue. Utilize `git` and `gh` commands for this exploration. Use `git log --grep="<keyword>"` to find related commits, `git grep "<error_message>"` to search the codebase for error strings, and `git blame <file>` to inspect the history of suspicious files. Start by getting an overview of the project structure with `ls -R`.
           4.  **Identify Root Cause:** Form a hypothesis about the root cause of the issue.
           5.  **Validate the Issue:** Assess if the issue is valid and if the description provides enough information to reproduce the problem. Determine if the issue description is sufficient for reproduction. Try reproducing it if possible.
 

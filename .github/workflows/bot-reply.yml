@@ -29,85 +29,135 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.generate_token.outputs.token }}
         run: |
+          # Common Info
           echo "NEW_COMMENT_AUTHOR=${{ github.event.comment.user.login }}" >> $GITHUB_ENV
           { echo "NEW_COMMENT_BODY<<EOF"; echo "${{ github.event.comment.body }}"; echo "EOF"; } >> "$GITHUB_ENV"
 
+          # Determine if PR or Issue
           if [ -n '${{ github.event.issue.pull_request }}' ]; then
             IS_PR="true"
           else
             IS_PR="false"
           fi
+          echo "IS_PR=$IS_PR" >> $GITHUB_OUTPUT
 
-          timeline_data=$(gh api "/repos/${{ github.repository }}/issues/${{ env.THREAD_NUMBER }}/timeline")
-          references=$(echo "$timeline_data" | jq -r '.[] | select(.event == "cross-referenced") | .source.issue | " - Mentioned in \(.html_url | if contains("/pull/") then "PR" else "Issue" end): #\(.number) - \(.title)"')
-          {
-            echo "CROSS_REFERENCES<<EOF"
-            if [ -n "$references" ]; then
-              echo "$references"
-            else
-              echo "No other issues or PRs have mentioned this thread."
-            fi
-            echo "EOF"
-          } >> "$GITHUB_ENV"
-
+          # Fetch and Format Context based on type
           if [[ "$IS_PR" == "true" ]]; then
-            echo "THREAD_TYPE=Pull Request" >> $GITHUB_ENV
-            echo "IS_PR=true" >> $GITHUB_OUTPUT
-            # MODIFICATION: Added 'author' to the json fields
-            pr_data=$(gh pr view ${{ env.THREAD_NUMBER }} --repo ${{ github.repository }} --json author,title,body,comments,reviews,headRefName,headRepository,headRefOid,closingIssuesReferences)
-            # NEW: Store the author's login
-            echo "THREAD_AUTHOR=$(echo "$pr_data" | jq -r .author.login)" >> $GITHUB_ENV
-            echo "repo_full_name=$(echo "$pr_data" | jq -r .headRepository.nameWithOwner)" >> $GITHUB_OUTPUT
-            echo "ref_name=$(echo "$pr_data" | jq -r .headRefName)" >> $GITHUB_OUTPUT
-            echo "PR_HEAD_SHA=$(echo "$pr_data" | jq -r .headRefOid)" >> $GITHUB_ENV
-            echo "THREAD_TITLE=$(echo "$pr_data" | jq -r .title)" >> $GITHUB_ENV
-            { echo "THREAD_BODY<<EOF"; echo "$pr_data" | jq -r .body; echo "EOF"; } >> "$GITHUB_ENV"
-            {
-              echo "LINKED_ISSUES_CONTEXT<<EOF"
-              issue_numbers=$(echo "$pr_data" | jq -r '.closingIssuesReferences[].number')
-              if [ -n "$issue_numbers" ]; then
-                for num in $issue_numbers; do
-                  issue_details=$(gh issue view "$num" --repo ${{ github.repository }} --json number,title,body)
-                  echo "$issue_details" | jq -r '"<issue>\n <number>#\(.number)</number>\n <title>\(.title // "Title not available")</title>\n <body>\n\(.body // "Body not available")\n</body>\n</issue>\n"'
-                done
-              else
-                echo "No issues are formally linked for closure by this PR."
-              fi
-              echo "EOF"
-            } >> "$GITHUB_ENV"
-            {
-              echo "THREAD_HISTORY<<EOF"
-              if [ "$(echo "$pr_data" | jq '.comments | length')" -gt 0 ]; then
-                echo "### General PR Comments"
-                echo "$pr_data" | jq -r '.comments[] | "Author: @\(.author.login // "unknown")\nDate: \(.createdAt // "N/A")\n\n\(.body // "")\n\n---\n"'
-              fi
-              if [ "$(echo "$pr_data" | jq '.reviews | length')" -gt 0 ]; then
-                echo "### Formal Code Reviews"
-                echo "$pr_data" | jq -r '.reviews[] | "Reviewer: @\(.author.login // "unknown")\nState: \(.state // "N/A")\nDate: \(.createdAt // "N/A")\n\n\(.body // "No summary comment.")\n" + (if .comments | length > 0 then "#### Line Comments in this Review:\n" + (.comments[] | "- **File:** \(.path) **Line:** \(.line)\n - **Comment:** \(.body // "")\n") else "" end) + "\n---\n"'
-              fi
-              if [ "$(echo "$pr_data" | jq '.comments | length')" -eq 0 ] && [ "$(echo "$pr_data" | jq '.reviews | length')" -eq 0 ]; then
-                echo "No comments or reviews have been submitted yet."
-              fi
-              echo "EOF"
-            } >> "$GITHUB_ENV"
-          else
-            echo "THREAD_TYPE=Issue" >> $GITHUB_ENV
-            echo "IS_PR=false" >> $GITHUB_OUTPUT
-            # MODIFICATION: Added 'author' to the json fields
-            issue_data=$(gh issue view ${{ env.THREAD_NUMBER }} --repo ${{ github.repository }} --json author,title,body,comments)
-            # NEW: Store the author's login
+            pr_json=$(gh pr view ${{ env.THREAD_NUMBER }} --repo ${{ github.repository }} --json author,title,body,createdAt,state,headRefName,baseRefName,headRefOid,additions,deletions,commits,files,comments,reviews,closingIssuesReferences)
+            
+            # For checkout step
+            echo "repo_full_name=$(echo "$pr_json" | jq -r .headRepository.nameWithOwner)" >> $GITHUB_OUTPUT
+            echo "ref_name=$(echo "$pr_json" | jq -r .headRefName)" >> $GITHUB_OUTPUT
+            
+            # For prompt context
+            echo "PR_HEAD_SHA=$(echo "$pr_json" | jq -r .headRefOid)" >> $GITHUB_ENV
+            echo "THREAD_AUTHOR=$(echo "$pr_json" | jq -r .author.login)" >> $GITHUB_ENV
+
+            # Prepare metadata
+            author=$(echo "$pr_json" | jq -r .author.login)
+            created_at=$(echo "$pr_json" | jq -r .createdAt)
+            base_branch=$(echo "$pr_json" | jq -r .baseRefName)
+            head_branch=$(echo "$pr_json" | jq -r .headRefName)
+            state=$(echo "$pr_json" | jq -r .state)
+            additions=$(echo "$pr_json" | jq -r .additions)
+            deletions=$(echo "$pr_json" | jq -r .deletions)
+            total_commits=$(echo "$pr_json" | jq -r '.commits | length')
+            changed_files_count=$(echo "$pr_json" | jq -r '.files | length')
+            title=$(echo "$pr_json" | jq -r .title)
+            body=$(echo "$pr_json" | jq -r .body)
+
+            # Prepare changed files list
+            changed_files_list=$(echo "$pr_json" | jq -r '.files[] | "- \(.path) (MODIFIED) +\((.additions))/-((.deletions))"')
+
+            # Prepare comments
+            comments=$(echo "$pr_json" | jq -r 'if (.comments | length) > 0 then .comments[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n\(.body // "")\n" else "No general comments." end')
+
+            # Prepare reviews
+            reviews=$(echo "$pr_json" | jq -r 'if (.reviews | length) > 0 then .reviews[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n  - Review body: \(.body // "No summary comment.")\n" + (if .comments.nodes | length > 0 then "  - Comments:\n" + (.comments.nodes[] | "    - \(.path):\(.line): \(.body // "")\n") else "" end) else "No formal reviews." end')
+            
+            # Prepare linked issues
+            linked_issues=$(echo "$pr_json" | jq -r 'if (.closingIssuesReferences.nodes | length) > 0 then .closingIssuesReferences.nodes[] | "<issue>\n <number>#\(.number)</number>\n <title>\(.title // "Title not available")</title>\n <body>\n\(.body // "Body not available")\n</body>\n</issue>\n" else "No issues are formally linked for closure by this PR." end')
+
+            # Assemble the final context block
+            THREAD_CONTEXT=$(cat <<EOF
+            Type: Pull Request
+            PR Number: #${{ env.THREAD_NUMBER }}
+            Title: $title
+            Author: $author
+            Created At: $created_at
+            Base Branch: $base_branch
+            Head Branch: $head_branch
+            State: $state
+            Additions: $additions
+            Deletions: $deletions
+            Total Commits: $total_commits
+            Changed Files: $changed_files_count files
+
+            <pull_request_body>
+            $body
+            </pull_request_body>
+
+            <pull_request_comments>
+            $comments
+            </pull_request_comments>
+
+            <pull_request_reviews>
+            $reviews
+            </pull_request_reviews>
+
+            <pull_request_changed_files>
+            $changed_files_list
+            </pull_request_changed_files>
+
+            <linked_issues>
+            $linked_issues
+            </linked_issues>
+            EOF
+            )
+            { echo "THREAD_CONTEXT<<EOF"; echo "$THREAD_CONTEXT"; echo "EOF"; } >> "$GITHUB_ENV"
+
+          else # It's an Issue
+            issue_data=$(gh issue view ${{ env.THREAD_NUMBER }} --repo ${{ github.repository }} --json author,title,body,createdAt,state,comments)
+            timeline_data=$(gh api "/repos/${{ github.repository }}/issues/${{ env.THREAD_NUMBER }}/timeline")
             echo "THREAD_AUTHOR=$(echo "$issue_data" | jq -r .author.login)" >> $GITHUB_ENV
-            echo "THREAD_TITLE=$(echo "$issue_data" | jq -r .title)" >> $GITHUB_ENV
-            { echo "THREAD_BODY<<EOF"; echo "$issue_data" | jq -r .body; echo "EOF"; } >> "$GITHUB_ENV"
-            {
-              echo "THREAD_HISTORY<<EOF"
-              if [ "$(echo "$issue_data" | jq '.comments | length')" -gt 0 ]; then
-                echo "$(echo "$issue_data" | jq -r '.comments[] | "Author: @\(.author.login // "unknown")\nDate: \(.createdAt // "N/A")\n\n\(.body // "")\n\n---\n"')"
-              else
-                echo "No comments have been posted yet."
-              fi
-              echo "EOF"
-            } >> "$GITHUB_ENV"
+
+            # Prepare metadata
+            author=$(echo "$issue_data" | jq -r .author.login)
+            created_at=$(echo "$issue_data" | jq -r .createdAt)
+            state=$(echo "$issue_data" | jq -r .state)
+            title=$(echo "$issue_data" | jq -r .title)
+            body=$(echo "$issue_data" | jq -r .body)
+
+            # Prepare comments
+            comments=$(echo "$issue_data" | jq -r 'if (.comments | length) > 0 then .comments[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n\(.body // "")\n" else "No comments have been posted yet." end')
+            
+            # Prepare cross-references
+            references=$(echo "$timeline_data" | jq -r '.[] | select(.event == "cross-referenced") | .source.issue | "- Mentioned in \(.html_url | if contains("/pull/") then "PR" else "Issue" end): #\(.number) - \(.title)"')
+            if [ -z "$references" ]; then references="No other issues or PRs have mentioned this thread."; fi
+
+            # Assemble final Issue context block
+            THREAD_CONTEXT=$(cat <<EOF
+            Type: Issue
+            Issue Number: #${{ env.THREAD_NUMBER }}
+            Title: $title
+            Author: $author
+            Created At: $created_at
+            State: $state
+
+            <issue_body>
+            $body
+            </issue_body>
+
+            <issue_comments>
+            $comments
+            </issue_comments>
+
+            <cross_references>
+            $references
+            </cross_references>
+            EOF
+            )
+            { echo "THREAD_CONTEXT<<EOF"; echo "$THREAD_CONTEXT"; echo "EOF"; } >> "$GITHUB_ENV"
           fi
 
       - name: Checkout PR head
@@ -207,28 +257,14 @@ jobs:
             You are an expert AI software engineer, acting as a principal-level collaborator. You have been mentioned in a GitHub discussion to provide assistance. Your function is to analyze the user's request in the context of the entire thread, autonomously select the appropriate strategy, and execute the plan step by step. Use your available tools, such as bash for running commands like gh or git, to interact with the repository, post comments, or make changes as needed.
             Your ultimate goal is to effectively address the user's needs while maintaining high-quality standards.
 
-            **Your Identity:** You operate under the names **mirrobot**, **mirrobot-agent**, or the git user **mirrobot-agent[bot]**. When analyzing the thread history, recognize comments or code authored by these names as your own. This is crucial for context, such as knowing when you are being asked to review your own code.
-
-            Always keep the user informed by posting clear, informative comments on the GitHub thread to explain what you are doing, provide progress updates, and summarize results. Use gh commands to post, edit, or reply in the thread so that all communication is visible to the user there, not just in your internal session. For example, before starting a task, post a comment like "I'm analyzing this issue and will perform a code review." After completion, post a detailed summary including what was accomplished, key changes, root causes, solutions, and any created PRs or updates, formatted professionally with sections like Summary, Key Changes, The Fix, and Pull Request Created if applicable. And edit your own older messages once you make edits - behave like a human would. Focus on sharing only useful, high-level information with the GitHub user; avoid mentioning internal actions like reading files or tool executions that aren't relevant to them.
+            # [Your Identity]
+            You operate under the names **mirrobot**, **mirrobot-agent**, or the git user **mirrobot-agent[bot]**. When analyzing the thread history, recognize comments or code authored by these names as your own. This is crucial for context, such as knowing when you are being asked to review your own code.
 
             # [THREAD CONTEXT]
-            - **Thread Type:** `${{ env.THREAD_TYPE }}` #${{ env.THREAD_NUMBER }}
-            - **Title:** `${{ env.THREAD_TITLE }}`
-            - **Author:** @${{ env.THREAD_AUTHOR }}
-            - **Original Description:**
-            ---
-            ${{ env.THREAD_BODY }}
-            ---
-            - **Linked Issues (if PR):**
-            ${{ env.LINKED_ISSUES_CONTEXT }}
-            - **Cross-References (Mentions in other threads):**
-            ---
-            ${{ env.CROSS_REFERENCES }}
-            ---
-            - **Full Conversation History:**
-            ---
-            ${{ env.THREAD_HISTORY }}
-            ---
+            This is the full, structured context for the thread. Analyze it to understand the history and current state before acting.
+            <thread_context>
+            ${{ env.THREAD_CONTEXT }}
+            </thread_context>
 
             # [USER'S LATEST REQUEST]
             The user **@${{ env.NEW_COMMENT_AUTHOR }}** has just tagged you with the following request. This is the central task you must address:
@@ -237,12 +273,12 @@ jobs:
             </new-request-from-user>
 
             # [AI'S INTERNAL MONOLOGUE & STRATEGY SELECTION]
-            1.  **Analyze Context & Intent:** First, determine your context (**Issue** or **Pull Request**). Then, analyze the `<new-request-from-user>` to understand the true intent. Vague requests require you to infer the most helpful action. Crucially, review the **Cross-References** and **Author** (`@${{ env.THREAD_AUTHOR }}`) to understand the full picture.
+            1.  **Analyze Context & Intent:** First, determine the thread type (Issue or Pull Request) from the provided `<thread_context>`. Then, analyze the `<new-request-from-user>` to understand the true intent. Vague requests require you to infer the most helpful action. Crucially, review the full thread context, including the author, comments, and any cross-references, to understand the full picture.
                 - **Self-Awareness Check:** Note if the thread was authored by one of your identities (mirrobot, mirrobot-agent). If you are asked to review your own work, acknowledge it and proceed with a neutral, objective assessment.
                 - **Example 1:** If the request is `"@mirrobot is this ready?"`
                     - **On a PR:** The intent is a readiness check, which suggests a **Full Code Review (Strategy 3)**.
-                    - **On an Issue:** The intent is a status check, which suggests an **Investigation (Strategy 2)** to find linked PRs and check the status from the **Cross-References**.
-                - **Example 2:** If you see in the **Cross-References** that this issue is mentioned in another, recently closed issue, you should investigate if it is a duplicate.
+                    - **On an Issue:** The intent is a status check, which suggests an **Investigation (Strategy 2)** to find linked PRs and check the status from the `<cross_references>` tag.
+                - **Example 2:** If you see in the `<cross_references>` that this issue is mentioned in another, recently closed issue, you should investigate if it is a duplicate.
             2.  **Formulate a Plan:** Based on your analysis, choose one or more strategies from the **[COMPREHENSIVE STRATEGIES]**. Proceed step by step, using tools like bash to run necessary commands (e.g., gh for GitHub interactions, git for repository changes) as you go. Incorporate user communication at key points: post an initial comment on what you plan to do, update via editing if progress changes, and conclude with a comprehensive summary comment. Use bash with gh, or fallback to curl with GitHub API if needed for advanced interactions, but ensure all outputs visible to the user are polished and relevant. If solving an issue requires code changes, prioritize Strategy 4 and create a PR.
             3.  **Execute:** Think step by step and use your tools to implement the plan, such as posting comments, running investigations, or making code changes. If your plan involves creating a new PR (e.g., via bash with `gh pr create`), ensure you post a link and summary in the original thread.
 
@@ -257,6 +293,7 @@ jobs:
             - Provide updates: If a task is multi-step, edit your initial comment to add progress (using bash with `gh issue comment --edit [comment_id]` or curl equivalent), mimicking human behavior by updating existing posts rather than spamming new ones.
             - Conclude with details: After completion, post a formatted summary comment addressing the user, including sections like Summary, Key Changes Made, Root Cause, Solution, The Fix (with explanations), and any PR created (with link and description). Make it professional and helpful, like: "Perfect! I've successfully fixed the [issue]. Here's what I accomplished: ## Summary [brief overview] ## Key Changes Made - [details] ## The Fix [explanation] ## Pull Request Created [link and info]".
             - Ensure all user-visible outputs are in the GitHub thread; use bash with gh commands, or curl with API for this. Avoid mentioning opencode sessions or internal processes.
+            - Always keep the user informed by posting clear, informative comments on the GitHub thread to explain what you are doing, provide progress updates, and summarize results. Use gh commands to post, edit, or reply in the thread so that all communication is visible to the user there, not just in your internal session. For example, before starting a task, post a comment like "I'm analyzing this issue and will perform a code review." After completion, post a detailed summary including what was accomplished, key changes, root causes, solutions, and any created PRs or updates, formatted professionally with sections like Summary, Key Changes, The Fix, and Pull Request Created if applicable. And edit your own older messages once you make edits - behave like a human would. Focus on sharing only useful, high-level information with the GitHub user; avoid mentioning internal actions like reading files or tool executions that aren't relevant to them.
 
             # [COMPREHENSIVE STRATEGIES]
             ---
@@ -300,7 +337,6 @@ jobs:
             ### Strategy 3: The Code Reviewer (Pull Requests Only)
             **When to use:** When explicitly asked to review a PR, or when a vague question like "is this ready?" implies a review is needed.
             **Behavior:** Post an initial comment indicating you're starting the review. Provide multiple, fine-grained line comments for specific feedback, followed by one final summary comment. Proceed step by step to post each comment, keeping internal steps hidden.
-
             **Special Rule for Self-Review:**
             Before starting, you **must** check if the PR author (`@${{ env.THREAD_AUTHOR }}`) is one of your own identities (mirrobot, mirrobot-agent). If it is, your entire approach changes:
             - **Tone:** Adopt a lighthearted, self-deprecating, and humorous tone. Frame critiques as discoveries of your own past mistakes. Joke about reviewing your own work being like "unearthing past mysteries" or "finding my own old diary entries."
@@ -342,24 +378,23 @@ jobs:
             _This review was generated by an AI assistant._
             EOF
             ```
-            Edit the initial comment to note progress if needed.
             ---
             ### Strategy 4: The Code Contributor
-            **When to use:** When the user explicitly asks you to write, modify, or commit code (e.g., "please apply this fix," "add the documentation for this," "solve this issue"). This applies to both PRs and issues; for issues, create a new branch and PR if needed.
+            **When to use:** When the user explicitly asks you to write, modify, or commit code (e.g., "please apply this fix", "add the documentation for this", "solve this issue"). This applies to both PRs and issues; for issues, create a new branch and PR if needed.
             **Behavior:** Post an initial comment on what changes you're making. For existing PRs, modify files directly. For issues, create a new branch (e.g., via `git checkout -b fix/issue-${{ env.THREAD_NUMBER }}`), implement fixes, commit, push, and create a PR with `gh pr create` (include `--body` with details and "closes #${{ env.THREAD_NUMBER }}"). Notify the user with a detailed summary including key changes, root cause, solution, and any new commits or PR links, without exposing internal file operations.
             **Expected Commands:**
             ```bash
-            # Post initial update
-            gh pr comment ${{ env.THREAD_NUMBER }} --body "@${{ env.NEW_COMMENT_AUTHOR }}, I'm implementing the requested changes now."  # Use gh issue comment for issues
+            # Post initial update (use gh issue comment for issues)
+            gh pr comment ${{ env.THREAD_NUMBER }} --body "@${{ env.NEW_COMMENT_AUTHOR }}, I'm implementing the requested changes now."
 
-            # For issues: Create branch if needed (internally)
+            # For issues: Create branch, modify files, commit, push, and create PR (internally)
             git checkout -b fix/issue-${{ env.THREAD_NUMBER }}
 
             # Modify files (internally)
             sed -i 's/old_code/new_code/' path/to/file.py
 
             # Stage changes (internally)
-            git add path/to/file.py
+            git add path/to/file.py or git add .
 
             # Commit changes (internally)
             git commit -m "fix: Resolve issue as requested by @${{ env.NEW_COMMENT_AUTHOR }}"
@@ -409,7 +444,7 @@ jobs:
             gh issue create --title "[New Issue Title]" --body "[Details, linking back to #${{ env.THREAD_NUMBER }}]" --label "bug,enhancement"  # Adjust as needed
 
             # Notify with summary
-            gh issue comment ${{ env.THREAD_NUMBER }} --body - <<EOF
+            gh issue comment ${{ env.THREAD_NUMBER }} --body - <<'EOF'
             @${{ env.NEW_COMMENT_AUTHOR }}, I've created a new issue: [Link from gh output].
 
             ## Summary
@@ -444,5 +479,5 @@ jobs:
             ```
             Failing to do this will cause the shell to misinterpret your message, leading to errors.
 
-            Now, based on the user's request, context, and history, analyze the situation, select the appropriate strategy or strategies, and proceed step by step to fulfill the mission using your tools and the expected commands as guides. Always incorporate communication to keep the user informed via GitHub comments, ensuring only relevant, useful info is shared.
+            Now, based on the user's request and the structured thread context provided, analyze the situation, select the appropriate strategy or strategies, and proceed step by step to fulfill the mission using your tools and the expected commands as guides. Always incorporate communication to keep the user informed via GitHub comments, ensuring only relevant, useful info is shared.
             END_OF_PROMPT
