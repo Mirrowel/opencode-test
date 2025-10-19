@@ -1,0 +1,139 @@
+{
+  "test_key_3": {
+    "daily": {
+      "date": "2025-10-19",
+      "models": {
+        "test/model": {
+          "success_count": 3,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "approx_cost": 0.0
+        }
+      }
+    },
+    "global": {
+      "models": {}
+    },
+    "model_cooldowns": {},
+    "failures": {
+      "test/model": {
+        "consecutive_failures": 0
+      }
+    },
+    "last_failure": {
+      "timestamp": 1760851482.228251,
+      "model": "test/model",
+      "error": "Rate limit exceeded"
+    },
+    "key_cooldown_until": null,
+    "last_daily_reset": "2025-10-19",
+    "last_used_ts": 1760851486.420924
+  },
+  "test_key_5": {
+    "daily": {
+      "date": "2025-10-19",
+      "models": {}
+    },
+    "global": {
+      "models": {}
+    },
+    "model_cooldowns": {
+      "test/model": 1760851486.3289068
+    },
+    "failures": {},
+    "last_failure": {
+      "timestamp": 1760851484.328964,
+      "model": "test/model",
+      "error": "Rate limit exceeded"
+    }
+  },
+  "test_key_4": {
+    "daily": {
+      "date": "2025-10-19",
+      "models": {
+        "test/model": {
+          "success_count": 1,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "approx_cost": 0.0
+        }
+      }
+    },
+    "global": {
+      "models": {}
+    },
+    "model_cooldowns": {
+      "test/model": 1760851488.4168644
+    },
+    "failures": {
+      "test/model": {
+        "consecutive_failures": 0
+      }
+    },
+    "last_daily_reset": "2025-10-19",
+    "last_used_ts": 1760851480.147293,
+    "last_failure": {
+      "timestamp": 1760851486.4169025,
+      "model": "test/model",
+      "error": "Rate limit exceeded"
+    }
+  },
+  "test_key_1": {
+    "daily": {
+      "date": "2025-10-19",
+      "models": {
+        "test/model": {
+          "success_count": 3,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "approx_cost": 0.0
+        }
+      }
+    },
+    "global": {
+      "models": {}
+    },
+    "model_cooldowns": {},
+    "failures": {
+      "test/model": {
+        "consecutive_failures": 0
+      }
+    },
+    "last_daily_reset": "2025-10-19",
+    "last_used_ts": 1760851486.380871,
+    "last_failure": {
+      "timestamp": 1760851482.1108131,
+      "model": "test/model",
+      "error": "Rate limit exceeded"
+    }
+  },
+  "test_key_2": {
+    "daily": {
+      "date": "2025-10-19",
+      "models": {
+        "test/model": {
+          "success_count": 4,
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "approx_cost": 0.0
+        }
+      }
+    },
+    "global": {
+      "models": {}
+    },
+    "model_cooldowns": {},
+    "failures": {
+      "test/model": {
+        "consecutive_failures": 0
+      }
+    },
+    "last_daily_reset": "2025-10-19",
+    "last_used_ts": 1760851485.3860703,
+    "last_failure": {
+      "timestamp": 1760851483.313556,
+      "model": "test/model",
+      "error": "Rate limit exceeded"
+    }
+  }
+}

@@ -29,7 +29,7 @@ class UsageManager:
         self._initialized = asyncio.Event()
         self._init_lock = asyncio.Lock()
 
-        self._timeout_lock = asyncio.Lock()
+        self._key_states_lock = asyncio.Lock()
         self._claimed_on_timeout: Set[str] = set()
 
         if daily_reset_time_utc:
@@ -118,15 +118,17 @@ class UsageManager:
         if needs_saving:
             await self._save_usage()
 
-    def _initialize_key_states(self, keys: List[str]):
+    async def _initialize_key_states(self, keys: List[str]):
         """Initializes state tracking for all provided keys if not already present."""
-        for key in keys:
-            if key not in self.key_states:
-                self.key_states[key] = {
-                    "lock": asyncio.Lock(),
-                    "condition": asyncio.Condition(),
-                    "models_in_use": set()
-                }
+        # Use the key states lock to prevent race conditions during key state initialization
+        async with self._key_states_lock:
+            for key in keys:
+                if key not in self.key_states:
+                    self.key_states[key] = {
+                        "lock": asyncio.Lock(),
+                        "condition": asyncio.Condition(),
+                        "models_in_use": set()
+                    }
 
     async def acquire_key(self, available_keys: List[str], model: str, deadline: float) -> str:
         """
@@ -135,14 +137,15 @@ class UsageManager:
         """
         await self._lazy_init()
         await self._reset_daily_stats_if_needed()
-        self._initialize_key_states(available_keys)
+        await self._initialize_key_states(available_keys)
 
         # This loop continues as long as the global deadline has not been met.
         while time.time() < deadline:
             tier1_keys, tier2_keys = [], []
             now = time.time()
             
-            # First, filter the list of available keys to exclude any on cooldown.
+            # Atomically filter and attempt to acquire keys to prevent race conditions.
+            # This ensures that cooldown checks and key acquisition happen in a single atomic operation.
             async with self._data_lock:
                 for key in available_keys:
                     key_data = self._usage_data.get(key, {})
@@ -153,7 +156,8 @@ class UsageManager:
 
                     # Prioritize keys based on their current usage to ensure load balancing.
                     usage_count = key_data.get("daily", {}).get("models", {}).get(model, {}).get("success_count", 0)
-                    key_state = self.key_states[key]
+                    async with self._key_states_lock:
+                        key_state = self.key_states[key]
 
                     # Tier 1: Completely idle keys (preferred).
                     if not key_state["models_in_use"]:
@@ -165,19 +169,37 @@ class UsageManager:
             tier1_keys.sort(key=lambda x: x[1])
             tier2_keys.sort(key=lambda x: x[1])
 
-            # Attempt to acquire a key from Tier 1 first.
+            # Attempt to acquire a key from Tier 1 first with atomic consistency check.
             for key, _ in tier1_keys:
-                state = self.key_states[key]
+                async with self._key_states_lock:
+                    state = self.key_states[key]
                 async with state["lock"]:
+                    # Double-check that the key is still available and not on cooldown
+                    # This prevents race conditions where cooldown was set after our initial check
+                    async with self._data_lock:
+                        key_data = self._usage_data.get(key, {})
+                        if (key_data.get("key_cooldown_until") or 0) > now or \
+                           (key_data.get("model_cooldowns", {}).get(model) or 0) > now:
+                            continue
+                    
                     if not state["models_in_use"]:
                         state["models_in_use"].add(model)
                         lib_logger.info(f"Acquired Tier 1 key ...{key[-4:]} for model {model}")
                         return key
 
-            # If no Tier 1 keys are available, try Tier 2.
+            # If no Tier 1 keys are available, try Tier 2 with atomic consistency check.
             for key, _ in tier2_keys:
-                state = self.key_states[key]
+                async with self._key_states_lock:
+                    state = self.key_states[key]
                 async with state["lock"]:
+                    # Double-check that the key is still available and not on cooldown
+                    # This prevents race conditions where cooldown was set after our initial check
+                    async with self._data_lock:
+                        key_data = self._usage_data.get(key, {})
+                        if (key_data.get("key_cooldown_until") or 0) > now or \
+                           (key_data.get("model_cooldowns", {}).get(model) or 0) > now:
+                            continue
+                    
                     if model not in state["models_in_use"]:
                         state["models_in_use"].add(model)
                         lib_logger.info(f"Acquired Tier 2 key ...{key[-4:]} for model {model}")
@@ -194,7 +216,8 @@ class UsageManager:
 
             # Wait on the condition of the key with the lowest current usage.
             best_wait_key = min(all_potential_keys, key=lambda x: x[1])[0]
-            wait_condition = self.key_states[best_wait_key]["condition"]
+            async with self._key_states_lock:
+                wait_condition = self.key_states[best_wait_key]["condition"]
             
             try:
                 async with wait_condition:
@@ -214,10 +237,11 @@ class UsageManager:
 
     async def release_key(self, key: str, model: str):
         """Releases a key's lock for a specific model and notifies waiting tasks."""
-        if key not in self.key_states:
-            return
-
-        state = self.key_states[key]
+        async with self._key_states_lock:
+            if key not in self.key_states:
+                return
+            state = self.key_states[key]
+        
         async with state["lock"]:
             if model in state["models_in_use"]:
                 state["models_in_use"].remove(model)
