@@ -21,9 +21,17 @@ class CooldownManager:
         """
         Initiates or extends a cooldown period for a provider.
         The cooldown is set to the current time plus the specified duration.
+        Uses atomic compare-and-swap to prevent race conditions.
         """
         async with self._lock:
-            self._cooldowns[provider] = time.time() + duration
+            current_time = time.time()
+            new_cooldown_end = current_time + duration
+            existing_cooldown = self._cooldowns.get(provider, 0)
+            
+            # Only update if the new cooldown is longer than existing one
+            # This prevents shorter cooldowns from overwriting longer ones
+            if new_cooldown_end > existing_cooldown:
+                self._cooldowns[provider] = new_cooldown_end
 
     async def get_cooldown_remaining(self, provider: str) -> float:
         """

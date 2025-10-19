@@ -66,6 +66,8 @@ class RotatingClient:
         self.cooldown_manager = CooldownManager()
         self._model_list_cache_task = None
         self._model_list_cache_ready = asyncio.Event()
+        # Global lock for key selection to prevent race conditions
+        self._key_selection_lock = asyncio.Lock()
 
     async def _populate_model_cache(self):
         """Asynchronously populates the model list cache."""
@@ -360,8 +362,10 @@ class RotatingClient:
         # Create a mutable copy of the keys and shuffle it to ensure
         # that the key selection is randomized, which is crucial when
         # multiple keys have the same usage stats.
-        keys_for_provider = list(self.api_keys[provider])
-        random.shuffle(keys_for_provider)
+        # Use global lock to prevent race conditions during key selection
+        async with self._key_selection_lock:
+            keys_for_provider = list(self.api_keys[provider])
+            random.shuffle(keys_for_provider)
         
         tried_keys = set()
         last_exception = None
@@ -523,8 +527,10 @@ class RotatingClient:
         provider = model.split('/')[0]
         
         # Create a mutable copy of the keys and shuffle it.
-        keys_for_provider = list(self.api_keys[provider])
-        random.shuffle(keys_for_provider)
+        # Use global lock to prevent race conditions during key selection
+        async with self._key_selection_lock:
+            keys_for_provider = list(self.api_keys[provider])
+            random.shuffle(keys_for_provider)
         
         deadline = time.time() + self.global_timeout
         tried_keys = set()

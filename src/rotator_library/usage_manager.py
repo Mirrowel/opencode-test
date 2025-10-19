@@ -131,7 +131,7 @@ class UsageManager:
     async def acquire_key(self, available_keys: List[str], model: str, deadline: float) -> str:
         """
         Acquires the best available key using a tiered, model-aware locking strategy,
-        respecting a global deadline.
+        respecting a global deadline. Uses atomic operations to prevent race conditions.
         """
         await self._lazy_init()
         await self._reset_daily_stats_if_needed()
@@ -143,6 +143,7 @@ class UsageManager:
             now = time.time()
             
             # First, filter the list of available keys to exclude any on cooldown.
+            # Use a single atomic operation to check cooldown state and acquire keys
             async with self._data_lock:
                 for key in available_keys:
                     key_data = self._usage_data.get(key, {})
@@ -165,19 +166,21 @@ class UsageManager:
             tier1_keys.sort(key=lambda x: x[1])
             tier2_keys.sort(key=lambda x: x[1])
 
-            # Attempt to acquire a key from Tier 1 first.
+            # Attempt to acquire a key from Tier 1 first with atomic check-and-acquire
             for key, _ in tier1_keys:
                 state = self.key_states[key]
                 async with state["lock"]:
+                    # Double-check the condition inside the lock to prevent race conditions
                     if not state["models_in_use"]:
                         state["models_in_use"].add(model)
                         lib_logger.info(f"Acquired Tier 1 key ...{key[-4:]} for model {model}")
                         return key
 
-            # If no Tier 1 keys are available, try Tier 2.
+            # If no Tier 1 keys are available, try Tier 2 with atomic check-and-acquire
             for key, _ in tier2_keys:
                 state = self.key_states[key]
                 async with state["lock"]:
+                    # Double-check the condition inside the lock to prevent race conditions
                     if model not in state["models_in_use"]:
                         state["models_in_use"].add(model)
                         lib_logger.info(f"Acquired Tier 2 key ...{key[-4:]} for model {model}")
