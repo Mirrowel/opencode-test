@@ -182,7 +182,7 @@ jobs:
           **Step 1: Post Acknowledgment Comment**
           Use this command to inform the user you are starting.
           ```bash
-          gh issue comment ${{ env.ISSUE_NUMBER }} --body "Thank you for submitting this issue. I am now beginning my analysis and will report back shortly."
+          gh issue comment ${{ env.ISSUE_NUMBER }} --body "@${{ env.ISSUE_AUTHOR }} Thank you for submitting this issue. I am now beginning my analysis and will report back shortly."
           ```
 
           **Step 2: Conduct Investigation**
