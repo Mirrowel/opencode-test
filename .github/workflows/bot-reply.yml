@@ -110,12 +110,14 @@ jobs:
         with:
           repository: ${{ steps.context.outputs.repo_full_name }}
           ref: ${{ steps.context.outputs.ref_name }}
+          token: ${{ steps.generate_token.outputs.token }}
           fetch-depth: 0
 
       - name: Checkout repository (for issues)
         if: steps.context.outputs.IS_PR == 'false'
         uses: actions/checkout@v4
         with:
+          token: ${{ steps.generate_token.outputs.token }}
           fetch-depth: 0
 
       - name: Configure Git for Bot
@@ -230,8 +232,8 @@ jobs:
                     - **On a PR:** The intent is a readiness check, which suggests a **Full Code Review (Strategy 3)**.
                     - **On an Issue:** The intent is a status check, which suggests an **Investigation (Strategy 2)** to find linked PRs and check the status from the **Cross-References**.
                 - **Example 2:** If you see in the **Cross-References** that this issue is mentioned in another, recently closed issue, you should investigate if it is a duplicate.
-            2.  **Formulate a Plan:** Based on your analysis, choose one or more strategies from the **[COMPREHENSIVE STRATEGIES]**. Proceed step by step, using tools like bash to run necessary commands (e.g., gh for GitHub interactions, git for repository changes) as you go. Incorporate user communication at key points: post an initial comment on what you plan to do, update via editing if progress changes, and conclude with a comprehensive summary comment. Use gh api or curl if needed for advanced interactions, but ensure all outputs visible to the user are polished and relevant.
-            3.  **Execute:** Think step by step and use your tools to implement the plan, such as posting comments, running investigations, or making code changes. If your plan involves creating a new PR (e.g., via `gh pr create`), ensure you post a link and summary in the original thread.
+            2.  **Formulate a Plan:** Based on your analysis, choose one or more strategies from the **[COMPREHENSIVE STRATEGIES]**. Proceed step by step, using tools like bash to run necessary commands (e.g., gh for GitHub interactions, git for repository changes) as you go. Incorporate user communication at key points: post an initial comment on what you plan to do, update via editing if progress changes, and conclude with a comprehensive summary comment. Use bash with gh, or fallback to curl with GitHub API if needed for advanced interactions, but ensure all outputs visible to the user are polished and relevant. If solving an issue requires code changes, prioritize Strategy 4 and create a PR.
+            3.  **Execute:** Think step by step and use your tools to implement the plan, such as posting comments, running investigations, or making code changes. If your plan involves creating a new PR (e.g., via bash with `gh pr create`), ensure you post a link and summary in the original thread.
 
             # [FEEDBACK PHILOSOPHY: HIGH-SIGNAL, LOW-NOISE]
             When reviewing code, your priority is value, not volume.
@@ -241,9 +243,9 @@ jobs:
             # [COMMUNICATION GUIDELINES]
             - Prioritize transparency: Always post comments to the GitHub thread to inform the user of your actions, progress, and outcomes. The GitHub user should only see useful, high-level information; do not expose internal session details or low-level tool calls.
             - Start with an acknowledgment: Post a comment indicating what you understood the request to be and what you plan to do.
-            - Provide updates: If a task is multi-step, edit your initial comment to add progress (using `gh issue comment --edit [comment_id]` or similar), mimicking human behavior by updating existing posts rather than spamming new ones.
+            - Provide updates: If a task is multi-step, edit your initial comment to add progress (using bash with `gh issue comment --edit [comment_id]` or curl equivalent), mimicking human behavior by updating existing posts rather than spamming new ones.
             - Conclude with details: After completion, post a formatted summary comment addressing the user, including sections like Summary, Key Changes Made, Root Cause, Solution, The Fix (with explanations), and any PR created (with link and description). Make it professional and helpful, like: "Perfect! I've successfully fixed the [issue]. Here's what I accomplished: ## Summary [brief overview] ## Key Changes Made - [details] ## The Fix [explanation] ## Pull Request Created [link and info]".
-            - Ensure all user-visible outputs are in the GitHub thread; use gh commands, api calls, or curl for this. Avoid mentioning opencode sessions or internal processes.
+            - Ensure all user-visible outputs are in the GitHub thread; use bash with gh commands, or curl with API for this. Avoid mentioning opencode sessions or internal processes.
 
             # [COMPREHENSIVE STRATEGIES]
             ---
