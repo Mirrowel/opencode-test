@@ -31,6 +31,10 @@ class UsageManager:
 
         self._timeout_lock = asyncio.Lock()
         self._claimed_on_timeout: Set[str] = set()
+        
+        # Add a dedicated lock for key acquisition to prevent race conditions
+        # between cooldown checks and key state updates
+        self._key_acquisition_lock = asyncio.Lock()
 
         if daily_reset_time_utc:
             hour, minute = map(int, daily_reset_time_utc.split(':'))
@@ -118,6 +122,12 @@ class UsageManager:
         if needs_saving:
             await self._save_usage()
 
+    def _is_key_cooling_down(self, key: str, model: str, current_time: float) -> bool:
+        """Checks if a specific key is cooling down for a model (non-locking version)."""
+        key_data = self._usage_data.get(key, {})
+        return ((key_data.get("key_cooldown_until") or 0) > current_time or 
+                (key_data.get("model_cooldowns", {}).get(model) or 0) > current_time)
+
     def _initialize_key_states(self, keys: List[str]):
         """Initializes state tracking for all provided keys if not already present."""
         for key in keys:
@@ -131,7 +141,7 @@ class UsageManager:
     async def acquire_key(self, available_keys: List[str], model: str, deadline: float) -> str:
         """
         Acquires the best available key using a tiered, model-aware locking strategy,
-        respecting a global deadline.
+        respecting a global deadline. Uses atomic operations to prevent race conditions.
         """
         await self._lazy_init()
         await self._reset_daily_stats_if_needed()
@@ -142,46 +152,58 @@ class UsageManager:
             tier1_keys, tier2_keys = [], []
             now = time.time()
             
-            # First, filter the list of available keys to exclude any on cooldown.
-            async with self._data_lock:
-                for key in available_keys:
-                    key_data = self._usage_data.get(key, {})
-                    
-                    if (key_data.get("key_cooldown_until") or 0) > now or \
-                       (key_data.get("model_cooldowns", {}).get(model) or 0) > now:
+            # Use a comprehensive lock to prevent race conditions between cooldown checks
+            # and key acquisition across concurrent requests
+            async with self._key_acquisition_lock:
+                # First, filter the list of available keys to exclude any on cooldown.
+                async with self._data_lock:
+                    for key in available_keys:
+                        key_data = self._usage_data.get(key, {})
+                        
+                        if (key_data.get("key_cooldown_until") or 0) > now or \
+                           (key_data.get("model_cooldowns", {}).get(model) or 0) > now:
+                            continue
+
+                        # Prioritize keys based on their current usage to ensure load balancing.
+                        usage_count = key_data.get("daily", {}).get("models", {}).get(model, {}).get("success_count", 0)
+                        key_state = self.key_states[key]
+
+                        # Tier 1: Completely idle keys (preferred).
+                        if not key_state["models_in_use"]:
+                            tier1_keys.append((key, usage_count))
+                        # Tier 2: Keys busy with other models, but free for this one.
+                        elif model not in key_state["models_in_use"]:
+                            tier2_keys.append((key, usage_count))
+
+                tier1_keys.sort(key=lambda x: x[1])
+                tier2_keys.sort(key=lambda x: x[1])
+
+                # Attempt to acquire a key from Tier 1 first.
+                for key, _ in tier1_keys:
+                    state = self.key_states[key]
+                    # Use a non-blocking try_lock approach to avoid deadlock
+                    if state["lock"].locked():
                         continue
+                    
+                    async with state["lock"]:
+                        # Double-check the condition inside the individual key lock
+                        if not state["models_in_use"] and not self._is_key_cooling_down(key, model, now):
+                            state["models_in_use"].add(model)
+                            lib_logger.info(f"Acquired Tier 1 key ...{key[-4:]} for model {model}")
+                            return key
 
-                    # Prioritize keys based on their current usage to ensure load balancing.
-                    usage_count = key_data.get("daily", {}).get("models", {}).get(model, {}).get("success_count", 0)
-                    key_state = self.key_states[key]
-
-                    # Tier 1: Completely idle keys (preferred).
-                    if not key_state["models_in_use"]:
-                        tier1_keys.append((key, usage_count))
-                    # Tier 2: Keys busy with other models, but free for this one.
-                    elif model not in key_state["models_in_use"]:
-                        tier2_keys.append((key, usage_count))
-
-            tier1_keys.sort(key=lambda x: x[1])
-            tier2_keys.sort(key=lambda x: x[1])
-
-            # Attempt to acquire a key from Tier 1 first.
-            for key, _ in tier1_keys:
-                state = self.key_states[key]
-                async with state["lock"]:
-                    if not state["models_in_use"]:
-                        state["models_in_use"].add(model)
-                        lib_logger.info(f"Acquired Tier 1 key ...{key[-4:]} for model {model}")
-                        return key
-
-            # If no Tier 1 keys are available, try Tier 2.
-            for key, _ in tier2_keys:
-                state = self.key_states[key]
-                async with state["lock"]:
-                    if model not in state["models_in_use"]:
-                        state["models_in_use"].add(model)
-                        lib_logger.info(f"Acquired Tier 2 key ...{key[-4:]} for model {model}")
-                        return key
+                # If no Tier 1 keys are available, try Tier 2.
+                for key, _ in tier2_keys:
+                    state = self.key_states[key]
+                    if state["lock"].locked():
+                        continue
+                    
+                    async with state["lock"]:
+                        # Double-check the condition inside the individual key lock
+                        if model not in state["models_in_use"] and not self._is_key_cooling_down(key, model, now):
+                            state["models_in_use"].add(model)
+                            lib_logger.info(f"Acquired Tier 2 key ...{key[-4:]} for model {model}")
+                            return key
 
             # If all eligible keys are locked, wait for a key to be released.
             lib_logger.info("All eligible keys are currently locked for this model. Waiting...")
