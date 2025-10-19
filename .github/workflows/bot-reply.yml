@@ -31,9 +31,9 @@ jobs:
         run: |
           # Common Info
           echo "NEW_COMMENT_AUTHOR=${{ github.event.comment.user.login }}" >> $GITHUB_ENV
-          # Use a unique delimiter for the comment body to be safe
-          DELIMITER_BODY="EOF_BODY_$(openssl rand -hex 8)"
-          { echo "NEW_COMMENT_BODY<<$DELIMITER_BODY"; echo "${{ github.event.comment.body }}"; echo "$DELIMITER_BODY"; } >> "$GITHUB_ENV"
+          # Use a unique delimiter for safety
+          COMMENT_DELIMITER="GH_BODY_DELIMITER_$(openssl rand -hex 8)"
+          { echo "NEW_COMMENT_BODY<<$COMMENT_DELIMITER"; echo "${{ github.event.comment.body }}"; echo "$COMMENT_DELIMITER"; } >> "$GITHUB_ENV"
 
           # Determine if PR or Issue
           if [ -n '${{ github.event.issue.pull_request }}' ]; then
@@ -43,8 +43,8 @@ jobs:
           fi
           echo "IS_PR=$IS_PR" >> $GITHUB_OUTPUT
 
-          # Define the main delimiter for the thread context
-          DELIMITER_CONTEXT="EOF_CONTEXT_$(openssl rand -hex 8)"
+          # Define a unique, random delimiter for the main context block
+          CONTEXT_DELIMITER="GH_CONTEXT_DELIMITER_$(openssl rand -hex 8)"
 
           # Fetch and Format Context based on type
           if [[ "$IS_PR" == "true" ]]; then
@@ -83,9 +83,10 @@ jobs:
             # Prepare linked issues
             linked_issues=$(echo "$pr_json" | jq -r 'if (.closingIssuesReferences.nodes | length) > 0 then .closingIssuesReferences.nodes[] | "<issue>\n <number>#\(.number)</number>\n <title>\(.title // "Title not available")</title>\n <body>\n\(.body // "Body not available")\n</body>\n</issue>\n" else "No issues are formally linked for closure by this PR." end')
 
-            # --- START: CORRECTED BLOCK ---
-            # Safely stream the context directly to GITHUB_ENV, avoiding command substitution.
-            echo "THREAD_CONTEXT<<$DELIMITER_CONTEXT" >> "$GITHUB_ENV"
+            # Step 1: Write the header for the multi-line environment variable.
+            echo "THREAD_CONTEXT<<$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
+
+            # Step 2: Stream the content directly into the environment file. This is safe.
             cat <<EOF >> "$GITHUB_ENV"
             Type: Pull Request
             PR Number: #${{ env.THREAD_NUMBER }}
@@ -120,8 +121,9 @@ jobs:
             $linked_issues
             </linked_issues>
             EOF
-            echo "$DELIMITER_CONTEXT" >> "$GITHUB_ENV"
-            # --- END: CORRECTED BLOCK ---
+            # Step 3: Write the closing delimiter.
+            echo "$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
+            # --- END: ROBUST IMPLEMENTATION ---
 
           else # It's an Issue
             issue_data=$(gh issue view ${{ env.THREAD_NUMBER }} --repo ${{ github.repository }} --json author,title,body,createdAt,state,comments)
@@ -142,8 +144,10 @@ jobs:
             references=$(echo "$timeline_data" | jq -r '.[] | select(.event == "cross-referenced") | .source.issue | "- Mentioned in \(.html_url | if contains("/pull/") then "PR" else "Issue" end): #\(.number) - \(.title)"')
             if [ -z "$references" ]; then references="No other issues or PRs have mentioned this thread."; fi
             
-            # Apply the same safe, direct-streaming pattern for Issues.
-            echo "THREAD_CONTEXT<<$DELIMITER_CONTEXT" >> "$GITHUB_ENV"
+            # Step 1: Write the header.
+            echo "THREAD_CONTEXT<<$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
+
+            # Step 2: Stream the content.
             cat <<EOF >> "$GITHUB_ENV"
             Type: Issue
             Issue Number: #${{ env.THREAD_NUMBER }}
@@ -164,7 +168,8 @@ jobs:
             $references
             </cross_references>
             EOF
-            echo "$DELIMITER_CONTEXT" >> "$GITHUB_ENV"
+            # Step 3: Write the footer.
+            echo "$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
           fi
 
       - name: Checkout PR head
