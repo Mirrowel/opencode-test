@@ -38,47 +38,58 @@ jobs:
         run: |
           pr_json=$(gh pr view ${{ env.PR_NUMBER }} --repo ${{ github.repository }} --json headRefName,headRepository,title,body,headRefOid,comments,reviews,closingIssuesReferences)
           
-          # Set outputs for the checkout step
+          # Set outputs for checkout and single-line env vars (this part is correct)
           echo "repo_full_name=$(echo "$pr_json" | jq -r .headRepository.nameWithOwner)" >> $GITHUB_OUTPUT
           echo "ref_name=$(echo "$pr_json" | jq -r .headRefName)" >> $GITHUB_OUTPUT
 
           # Set environment variables for the prompt step
           echo "PR_TITLE=$(echo "$pr_json" | jq -r .title)" >> $GITHUB_ENV
           echo "PR_HEAD_SHA=$(echo "$pr_json" | jq -r .headRefOid)" >> $GITHUB_ENV
-          {
-            echo "PR_BODY<<EOF"
-            echo "$pr_json" | jq -r .body
-            echo "EOF"
-          } >> "$GITHUB_ENV"
           
-          # --- Linked Issues Context ---
+          # Safely set the multi-line PR body
+          { echo "PR_BODY<<EOF"; echo "$pr_json" | jq -r .body; echo "EOF"; } >> "$GITHUB_ENV"
+          
+          # --- Linked Issues Context (Two-Stage Fetch) ---
           {
             echo "LINKED_ISSUES_CONTEXT<<EOF"
-            if [ "$(echo "$pr_json" | jq '.closingIssuesReferences | length')" -gt 0 ]; then
-              echo "$pr_json" | jq -r '.closingIssuesReferences[] | 
-                "<issue>\n  <number>#\(.number)</number>\n  <title>\(.title)</title>\n  <body>\n\(.body)\n</body>\n</issue>\n"'
+            # Get the list of issue numbers
+            issue_numbers=$(echo "$pr_json" | jq -r '.closingIssuesReferences[] | .number')
+
+            if [ -n "$issue_numbers" ]; then
+              # Loop through each issue number and fetch its details
+              for num in $issue_numbers; do
+                issue_details=$(gh issue view "$num" --repo ${{ github.repository }} --json number,title,body)
+                echo "$issue_details" | jq -r '
+                  "<issue>\n" +
+                  "  <number>#\(.number)</number>\n" +
+                  "  <title>\(.title // "Title not available")</title>\n" +
+                  "  <body>\n\(.body // "Body not available")\n</body>\n" +
+                  "</issue>\n"'
+              done
             else
-              echo "No issues are formally linked for closure by this PR - but still can be referenced in it."
+              echo "No issues are formally linked for closure by this PR."
             fi
             echo "EOF"
           } >> "$GITHUB_ENV"
           
-          # --- PR Comments and Reviews Context ---
+          # --- PR Comments and Reviews Context (with null protection) ---
           {
             echo "PR_CONTEXT<<EOF"
             
             # Format top-level comments
             if [ "$(echo "$pr_json" | jq '.comments | length')" -gt 0 ]; then
               echo "### General PR Comments"
-              echo "$pr_json" | jq -r '.comments[] | "Author: @\(.author.login)\nDate: \(.createdAt)\n\n\(.body)\n\n---\n"'
+              # Use // to provide default values for potentially null fields
+              echo "$pr_json" | jq -r '.comments[] | "Author: @\(.author.login // "unknown")\nDate: \(.createdAt // "N/A")\n\n\(.body // "")\n\n---\n"'
             fi
 
             # Format formal reviews and their line-comments
             if [ "$(echo "$pr_json" | jq '.reviews | length')" -gt 0 ]; then
               echo "### Formal Code Reviews"
+              # Added robust null handling for all fields, especially review body and line comments
               echo "$pr_json" | jq -r '.reviews[] | 
-                "Reviewer: @\(.author.login)\nState: \(.state)\nDate: \(.createdAt)\n\n\(.body)\n" + 
-                (if .comments | length > 0 then "#### Line Comments in this Review:\n" + (.comments[] | "- **File:** \(.path) **Line:** \(.line)\n  - **Comment:** \(.body)\n") else "" end) +
+                "Reviewer: @\(.author.login // "unknown")\nState: \(.state // "N/A")\nDate: \(.createdAt // "N/A")\n\n\(.body // "No summary comment.")\n" + 
+                (if .comments | length > 0 then "#### Line Comments in this Review:\n" + (.comments[] | "- **File:** \(.path) **Line:** \(.line)\n  - **Comment:** \(.body // "")\n") else "" end) +
                 "\n---\n"'
             fi
 
