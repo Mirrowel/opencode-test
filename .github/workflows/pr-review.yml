@@ -31,7 +31,7 @@ jobs:
           private-key: ${{ secrets.BOT_PRIVATE_KEY }}
 
       # STEP 1: Fetch only the metadata needed for checkout.
-      - name: Fetch PR Metadata
+      - name: Fetch PR Metadata and Context
         id: pr_meta
         env:
           GH_TOKEN: ${{ steps.generate_token.outputs.token }}
@@ -46,11 +46,12 @@ jobs:
           echo "PR_TITLE=$(echo "$pr_json" | jq -r .title)" >> $GITHUB_ENV
           echo "PR_BODY=$(echo "$pr_json" | jq -r .body)" >> $GITHUB_ENV
           echo "PR_HEAD_SHA=$(echo "$pr_json" | jq -r .headRefOid)" >> $GITHUB_ENV
-
+          
+          # --- Linked Issues Context ---
           {
             echo "LINKED_ISSUES_CONTEXT<<EOF"
-            if [ "$(echo "$pr_json" | jq '.closingIssuesReferences.nodes | length')" -gt 0 ]; then
-              echo "$pr_json" | jq -r '.closingIssuesReferences.nodes[] | 
+            if [ "$(echo "$pr_json" | jq '.closingIssuesReferences | length')" -gt 0 ]; then
+              echo "$pr_json" | jq -r '.closingIssuesReferences[] | 
                 "<issue>\n" +
                 "  <number>#\(.number)</number>\n" +
                 "  <title>\(.title)</title>\n" +
@@ -61,8 +62,8 @@ jobs:
             fi
             echo "EOF"
           } >> "$GITHUB_ENV"
-
-           # Format and set PR_CONTEXT (comments and reviews)
+          
+          # --- PR Comments and Reviews Context ---
           {
             echo "PR_CONTEXT<<EOF"
             
@@ -77,10 +78,8 @@ jobs:
               echo "### Formal Code Reviews"
               echo "$pr_json" | jq -r '.reviews[] | 
                 "Reviewer: @\(.author.login)\nState: \(.state)\nDate: \(.createdAt)\n\n\(.body)\n" + 
-                (if .comments.nodes | length > 0 then 
-                  "#### Line Comments in this Review:\n" + (
-                    .comments.nodes[] | "- **File:** \(.path) **Line:** \(.line)\n  - **Comment:** \(.body)\n"
-                  ) 
+                (if .comments | length > 0 then 
+                  "#### Line Comments in this Review:\n" + (.comments[] | "- **File:** \(.path) **Line:** \(.line)\n  - **Comment:** \(.body)\n") 
                 else "" end) +
                 "\n---\n"'
             fi
@@ -89,7 +88,6 @@ jobs:
             if [ "$(echo "$pr_json" | jq '.comments | length')" -eq 0 ] && [ "$(echo "$pr_json" | jq '.reviews | length')" -eq 0 ]; then
               echo "No comments or reviews have been submitted yet."
             fi
-
             echo "EOF"
           } >> "$GITHUB_ENV"
 
