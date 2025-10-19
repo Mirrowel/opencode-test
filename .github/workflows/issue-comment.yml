@@ -145,9 +145,9 @@ jobs:
               "webfetch": "deny"
             }
         run: |
-          # Use a heredoc (<<'EOF') to pass the prompt safely via stdin.
+          # Use a heredoc (<<'END_OF_PROMPT') to pass the prompt safely via stdin.
           # The "-" tells the opencode command to read the prompt from stdin.
-          opencode run --share -m llm-proxy/${{ secrets.OPENCODE_MODEL }} - <<'EOF'
+          opencode run --share -m llm-proxy/${{ secrets.OPENCODE_MODEL }} - <<'END_OF_PROMPT'
           # [ROLE & OBJECTIVE]
           You are an expert AI software engineer specializing in bug triage and analysis. Your goal is to provide a comprehensive initial analysis of this new issue to help the maintainers. You will perform an investigation and report your findings directly on the GitHub issue.
 
@@ -200,7 +200,7 @@ jobs:
             - A suggestion to check those issues first
 
             Use this format for the comment:
-            'This issue might be a duplicate of existing issues. Please check:
+            This issue might be a duplicate of existing issues. Please check:
             - #[issue_number]: [brief description of similarity]
 
             If duplicates are found, stop further analysis.
@@ -231,4 +231,4 @@ jobs:
           When using `bash` to execute commands with a `--body` flag (like `gh issue comment`), the safest method for multi-line content is to use a heredoc (`<<'EOF'`). This prevents the shell from misinterpreting special characters.
 
           Now, execute the plan. Start with Step 1.
-          EOF
+          END_OF_PROMPT

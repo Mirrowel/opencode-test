@@ -170,9 +170,9 @@ jobs:
               "webfetch": "deny"
             }
         run: |
-          # Use a heredoc (<<'EOF') to pass the prompt safely via stdin.
+          # Use a heredoc (<<'END_OF_PROMPT') to pass the prompt safely via stdin.
           # The "-" tells the opencode command to read the prompt from stdin.
-          opencode run --share -m llm-proxy/${{ secrets.OPENCODE_MODEL }} - <<'EOF'
+          opencode run --share -m llm-proxy/${{ secrets.OPENCODE_MODEL }} - <<'END_OF_PROMPT'
           # [ROLE AND OBJECTIVE]
           You are an expert AI code reviewer. Your goal is to provide meticulous, constructive, and actionable feedback by posting it directly to the pull request as a series of commands.
 
@@ -284,4 +284,4 @@ jobs:
           For multi-line bodies in the summary comment, you MUST use a heredoc (`<<'EOF'`) to prevent shell interpretation errors.
 
           Now, analyze the PR context and code. Then, generate the full sequence of commands starting with Step 1.
-          EOF
+          END_OF_PROMPT

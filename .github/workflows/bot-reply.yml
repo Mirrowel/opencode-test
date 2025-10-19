@@ -201,7 +201,7 @@ jobs:
               "webfetch": "deny"
             }
         run: |
-            opencode run --share -m llm-proxy/${{ secrets.OPENCODE_MODEL }} - <<'EOF'
+            opencode run --share -m llm-proxy/${{ secrets.OPENCODE_MODEL }} - <<'END_OF_PROMPT'
             # [ROLE & OBJECTIVE]
 
             You are an expert AI software engineer, acting as a principal-level collaborator. You have been mentioned in a GitHub discussion to provide assistance. Your function is to analyze the user's request in the context of the entire thread, autonomously select the appropriate strategy, and execute the plan step by step. Use your available tools, such as bash for running commands like gh or git, to interact with the repository, post comments, or make changes as needed.
@@ -283,7 +283,7 @@ jobs:
 
             # Run your investigation commands (internally, not visible to user)
             git grep "error string"
-            gh issue view ${{ env.THREAD_NUMBER }} --json linkedPullRequests
+            gh search prs --repo ${{ github.repository }} "mentions:${{ env.THREAD_NUMBER }}" --json number,title,state,url
 
             # Then post the structured findings using a heredoc
             gh issue comment ${{ env.THREAD_NUMBER }} --body - <<'EOF'
@@ -433,4 +433,4 @@ jobs:
             Failing to do this will cause the shell to misinterpret your message, leading to errors.
 
             Now, based on the user's request, context, and history, analyze the situation, select the appropriate strategy or strategies, and proceed step by step to fulfill the mission using your tools and the expected commands as guides. Always incorporate communication to keep the user informed via GitHub comments, ensuring only relevant, useful info is shared.
-            EOF
+            END_OF_PROMPT
