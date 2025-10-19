@@ -377,34 +377,40 @@ jobs:
             ```
             ---
             ### Strategy 4: The Code Contributor
-            **When to use:** When the user explicitly asks you to write, modify, or commit code (e.g., "please apply this fix", "add the documentation for this", "solve this issue"). This applies to both PRs and issues; for issues, create a new branch and PR if needed.
-            **Behavior:** Post an initial comment on what changes you're making. For existing PRs, modify files directly. For issues, create a new branch (e.g., via `git checkout -b fix/issue-${{ env.THREAD_NUMBER }}`), implement fixes, commit, push, and create a PR with `gh pr create` (include `--body` with details and "closes #${{ env.THREAD_NUMBER }}"). Notify the user with a detailed summary including key changes, root cause, solution, and any new commits or PR links, without exposing internal file operations.
+            **When to use:** When the user explicitly asks you to write, modify, or commit code (e.g., "please apply this fix," "add the documentation for this," "solve this issue"). This applies to both PRs and issues. A request to "fix" or "change" something implies a code contribution.
+
+            **Behavior:** This is a multi-step process that **must** result in a pushed commit and, if applicable, a new pull request.
+            1.  **Acknowledge:** Post an initial comment stating that you will implement the requested code changes (e.g., "I'm on it. I will implement the requested changes, commit them, and open a pull request.").
+            2.  **Branch:** For issues, create a new branch (e.g., `git checkout -b fix/issue-${{ env.THREAD_NUMBER }}`). For existing PRs, you are already on the correct branch.
+            3.  **Implement:** Make the necessary code modifications to the files.
+            4.  **Commit & Push (CRITICAL STEP):** You **must** stage (`git add`), commit (`git commit`), and push (`git push`) your changes to the remote repository. A request to "fix" or "change" code is **not complete** until a commit has been successfully pushed. This step is non-negotiable.
+            5.  **Create Pull Request:** If working from an issue, you **must** then create a new Pull Request using `gh pr create`. Ensure the PR body links back to the original issue (e.g., "Closes #${{ env.THREAD_NUMBER }}").
+            6.  **Report:** Conclude by posting a comprehensive summary comment in the original thread. This final comment **must** include a link to the new commit(s) or the newly created Pull Request. Failure to provide this link means the task is incomplete.
+
             **Expected Commands:**
             ```bash
-            # Post initial update (use gh issue comment for issues)
-            gh pr comment ${{ env.THREAD_NUMBER }} --body "@${{ env.NEW_COMMENT_AUTHOR }}, I'm implementing the requested changes now."
+            # Step 1: Post initial update (use `gh issue comment` for issues, `gh pr comment` for PRs)
+            gh issue comment ${{ env.THREAD_NUMBER }} --body "@${{ env.NEW_COMMENT_AUTHOR }}, I'm on it. I will implement the requested changes, commit them, and open a pull request to resolve this."
 
-            # For issues: Create branch, modify files, commit, push, and create PR (internally)
+            # Step 2: For issues, create a new branch. (This is done internally)
             git checkout -b fix/issue-${{ env.THREAD_NUMBER }}
 
-            # Modify files (internally)
-            sed -i 's/old_code/new_code/' path/to/file.py
+            # Step 3: Modify the code as needed. (This is done internally)
+            # For example: echo "fix: correct typo" > fix.txt
 
-            # Stage changes (internally)
-            git add path/to/file.py or git add .
-
-            # Commit changes (internally)
-            git commit -m "fix: Resolve issue as requested by @${{ env.NEW_COMMENT_AUTHOR }}"
-
-            # Push to the branch (internally)
+            # Step 4: Stage, Commit, and Push the changes. This is a MANDATORY sequence.
+            git add .
+            git commit -m "fix: Resolve issue #${{ env.THREAD_NUMBER }}" -m "This commit addresses the request from @${{ env.NEW_COMMENT_AUTHOR }}."
             git push origin fix/issue-${{ env.THREAD_NUMBER }}
 
-            # For issues: Create PR (internally)
-            gh pr create --title "Fix for #${{ env.THREAD_NUMBER }}: [Brief Title]" --body "[Detailed explanation, root cause, changes]. Closes #${{ env.THREAD_NUMBER }}." --base main  # Adjust base branch as needed
+            # Step 5: For issues, create the Pull Request. This is also MANDATORY.
+            # The `gh pr create` command outputs the URL of the new PR. You MUST use this URL in the final comment.
+            gh pr create --title "Fix: Address Issue #${{ env.THREAD_NUMBER }}" --body "This pull request resolves issue #${{ env.THREAD_NUMBER }}. Closes #${{ env.THREAD_NUMBER }}" --base main
 
-            # Notify the user with a detailed summary (use gh issue comment for issues) using a heredoc
-            gh pr comment ${{ env.THREAD_NUMBER }} -F - <<'EOF'
-            @${{ env.NEW_COMMENT_AUTHOR }}, I've successfully implemented the changes.  Here's what I accomplished:
+            # Step 6: Post the final summary, which MUST include the PR link.
+            # This confirms that the work has been verifiably completed.
+            gh issue comment ${{ env.THREAD_NUMBER }} -F - <<'EOF'
+            @${{ env.NEW_COMMENT_AUTHOR }}, I have successfully implemented and committed the requested changes.
 
             ## Summary
             [Brief overview of the fix or change.]
@@ -419,10 +425,10 @@ jobs:
             [Description of how it resolves the issue.]
 
             ## The Fix
-            [Key points on the implementation.]
+            [Explanation of the code changes and how they resolve the issue.]
 
             ## Pull Request Created
-            [Link to new PR, e.g., via output of gh pr create]
+            The changes are now ready for review in the following pull request: [PASTE THE URL FROM THE `gh pr create` OUTPUT HERE]
 
             _This update was generated by an AI assistant._
             EOF
