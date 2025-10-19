@@ -44,19 +44,19 @@ jobs:
 
           # Set environment variables for the prompt step
           echo "PR_TITLE=$(echo "$pr_json" | jq -r .title)" >> $GITHUB_ENV
-          echo "PR_BODY=$(echo "$pr_json" | jq -r .body)" >> $GITHUB_ENV
           echo "PR_HEAD_SHA=$(echo "$pr_json" | jq -r .headRefOid)" >> $GITHUB_ENV
+          {
+            echo "PR_BODY<<EOF"
+            echo "$pr_json" | jq -r .body
+            echo "EOF"
+          } >> "$GITHUB_ENV"
           
           # --- Linked Issues Context ---
           {
             echo "LINKED_ISSUES_CONTEXT<<EOF"
             if [ "$(echo "$pr_json" | jq '.closingIssuesReferences | length')" -gt 0 ]; then
               echo "$pr_json" | jq -r '.closingIssuesReferences[] | 
-                "<issue>\n" +
-                "  <number>#\(.number)</number>\n" +
-                "  <title>\(.title)</title>\n" +
-                "  <body>\n\(.body)\n</body>\n" +
-                "</issue>\n"'
+                "<issue>\n  <number>#\(.number)</number>\n  <title>\(.title)</title>\n  <body>\n\(.body)\n</body>\n</issue>\n"'
             else
               echo "No issues are formally linked for closure by this PR - but still can be referenced in it."
             fi
@@ -78,9 +78,7 @@ jobs:
               echo "### Formal Code Reviews"
               echo "$pr_json" | jq -r '.reviews[] | 
                 "Reviewer: @\(.author.login)\nState: \(.state)\nDate: \(.createdAt)\n\n\(.body)\n" + 
-                (if .comments | length > 0 then 
-                  "#### Line Comments in this Review:\n" + (.comments[] | "- **File:** \(.path) **Line:** \(.line)\n  - **Comment:** \(.body)\n") 
-                else "" end) +
+                (if .comments | length > 0 then "#### Line Comments in this Review:\n" + (.comments[] | "- **File:** \(.path) **Line:** \(.line)\n  - **Comment:** \(.body)\n") else "" end) +
                 "\n---\n"'
             fi
 
