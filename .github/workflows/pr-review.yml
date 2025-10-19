@@ -36,7 +36,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.generate_token.outputs.token }}
         run: |
-          pr_json=$(gh pr view ${{ env.PR_NUMBER }} --json headRefName,headRepository,title,body,headSha,comments,reviews,closingIssuesReferences)
+          pr_json=$(gh pr view ${{ env.PR_NUMBER }} --json headRefName,headRepository,title,body,headRefOid,comments,reviews,closingIssuesReferences)
           
           # Set outputs for the checkout step
           echo "repo_full_name=$(echo "$pr_json" | jq -r .headRepository.nameWithOwner)" >> $GITHUB_OUTPUT
@@ -45,7 +45,7 @@ jobs:
           # Set environment variables for the prompt step
           echo "PR_TITLE=$(echo "$pr_json" | jq -r .title)" >> $GITHUB_ENV
           echo "PR_BODY=$(echo "$pr_json" | jq -r .body)" >> $GITHUB_ENV
-          echo "PR_HEAD_SHA=$(echo "$pr_json" | jq -r .headSha)" >> $GITHUB_ENV
+          echo "PR_HEAD_SHA=$(echo "$pr_json" | jq -r .headRefOid)" >> $GITHUB_ENV
 
           {
             echo "LINKED_ISSUES_CONTEXT<<EOF"
