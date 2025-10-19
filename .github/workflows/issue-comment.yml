@@ -123,30 +123,25 @@ jobs:
           if [ -z "$references" ]; then
             references="No other issues or PRs have mentioned this thread."
           fi
-
-          # Assemble the final context block
-          ISSUE_CONTEXT=$(cat <<EOF
-          Issue: #${{ env.ISSUE_NUMBER }}
-          Title: $title
-          Author: $author
-          Created At: $created_at
-          State: $state
-
-          <issue_body>
-          $body
-          </issue_body>
-
-          <issue_comments>
-          $comments
-          </issue_comments>
-
-          <cross_references>
-          $references
-          </cross_references>
-          EOF
-          )
-          # Export to environment for the next step
-          { echo "ISSUE_CONTEXT<<EOF"; echo "$ISSUE_CONTEXT"; echo "EOF"; } >> "$GITHUB_ENV"
+          # Define a unique, random delimiter for the main context block
+          CONTEXT_DELIMITER="GH_ISSUE_CONTEXT_DELIMITER_$(openssl rand -hex 8)"
+          # Assemble the final context block directly into the environment file line by line
+          echo "ISSUE_CONTEXT<<$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
+          echo "Issue: #${{ env.ISSUE_NUMBER }}" >> "$GITHUB_ENV"
+          echo "Title: $title" >> "$GITHUB_ENV"
+          echo "Author: $author" >> "$GITHUB_ENV"
+          echo "Created At: $created_at" >> "$GITHUB_ENV"
+          echo "State: $state" >> "$GITHUB_ENV"
+          echo "<issue_body>" >> "$GITHUB_ENV"
+          echo "$body" >> "$GITHUB_ENV"
+          echo "</issue_body>" >> "$GITHUB_ENV"
+          echo "<issue_comments>" >> "$GITHUB_ENV"
+          echo "$comments" >> "$GITHUB_ENV"
+          echo "</issue_comments>" >> "$GITHUB_ENV"
+          echo "<cross_references>" >> "$GITHUB_ENV"
+          echo "$references" >> "$GITHUB_ENV"
+          echo "</cross_references>" >> "$GITHUB_ENV"
+          echo "$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
           # Also export author for the acknowledgment comment
           echo "ISSUE_AUTHOR=$author" >> $GITHUB_ENV
 
@@ -175,8 +170,8 @@ jobs:
 
           # [COMMUNICATION GUIDELINES]
           Your interaction must be in two steps to provide a good user experience:
-          1.  **Acknowledge:** Immediately post a short comment to let the user know you are starting your analysis.
-          2.  **Summarize:** After the analysis is complete, post a second, detailed comment with your full findings. Do not expose internal thought processes or tool executions in your comments; keep the output clean and professional.
+          1. **Acknowledge:** Immediately post a short comment to let the user know you are starting your analysis.
+          2. **Summarize:** After the analysis is complete, post a second, detailed comment with your full findings. Do not expose internal thought processes or tool executions in your comments; keep the output clean and professional.
 
           # [ISSUE CONTEXT]
           This is the full context for the issue you must analyze.
@@ -212,10 +207,10 @@ jobs:
             - #[issue_number]: [brief description of similarity]
 
             If duplicates are found, stop further analysis.
-          2.  **Understand the Problem:** Read the title and description within the `<issue_context>` to grasp the problem.
-          3.  **Explore the Codebase:** Navigate the repository to find the most relevant files, configurations, or recent commits related to the issue. Utilize `git` and `gh` commands for this exploration. Use `git log --grep="<keyword>"` to find related commits, `git grep "<error_message>"` to search the codebase for error strings, and `git blame <file>` to inspect the history of suspicious files. Start by getting an overview of the project structure with `ls -R`.
-          4.  **Identify Root Cause:** Form a hypothesis about the root cause of the issue.
-          5.  **Validate the Issue:** Assess if the issue is valid and if the description provides enough information to reproduce the problem. Determine if the issue description is sufficient for reproduction. Try reproducing it if possible.
+          2. **Understand the Problem:** Read the title and description within the `<issue_context>` to grasp the problem.
+          3. **Explore the Codebase:** Navigate the repository to find the most relevant files, configurations, or recent commits related to the issue. Utilize `git` and `gh` commands for this exploration. Use `git log --grep="<keyword>"` to find related commits, `git grep "<error_message>"` to search the codebase for error strings, and `git blame <file>` to inspect the history of suspicious files. Start by getting an overview of the project structure with `ls -R`.
+          4. **Identify Root Cause:** Form a hypothesis about the root cause of the issue.
+          5. **Validate the Issue:** Assess if the issue is valid and if the description provides enough information to reproduce the problem. Determine if the issue description is sufficient for reproduction. Try reproducing it if possible.
 
           **Step 3: Post Final Analysis Comment**
           After your internal investigation, post a single, well-formatted comment summarizing your findings. Use the command below, filling in the sections based on your analysis.
@@ -237,7 +232,7 @@ jobs:
 
           # [TOOLS NOTE]
           When using `bash` to execute `gh issue comment` with multi-line content from stdin, you MUST use the `-F -` flag with a heredoc (`<<'EOF'`). This correctly pipes the content to the command.
-          
+
           When using a heredoc (`<<'EOF'`), the closing delimiter (`EOF`) **must** be on a new line by itself, with no leading or trailing spaces, quotes, or other characters.
 
           Now, execute the plan. Start with Step 1.

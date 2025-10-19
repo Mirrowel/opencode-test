@@ -68,48 +68,41 @@ jobs:
           comments=$(echo "$pr_json" | jq -r 'if (.comments | length) > 0 then .comments[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n\(.body // "")\n" else "No general comments." end')
 
           # Prepare reviews (more complex formatting)
-          reviews=$(echo "$pr_json" | jq -r 'if (.reviews | length) > 0 then .reviews[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n  - Review body: \(.body // "No summary comment.")\n" + (if .comments | length > 0 then "  - Comments:\n" + (.comments.nodes[] | "    - \(.path):\(.line): \(.body // "")\n") else "" end) else "No formal reviews." end')
-          
+          reviews=$(echo "$pr_json" | jq -r 'if (.reviews | length) > 0 then .reviews[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n - Review body: \(.body // "No summary comment.")\n" + (if .comments | length > 0 then " - Comments:\n" + (.comments.nodes[] | " - \(.path):\(.line): \(.body // "")\n") else "" end) else "No formal reviews." end')
+         
           # Prepare linked issues
           linked_issues=$(echo "$pr_json" | jq -r 'if (.closingIssuesReferences.nodes | length) > 0 then .closingIssuesReferences.nodes[] | "<issue>\n <number>#\(.number)</number>\n <title>\(.title // "Title not available")</title>\n <body>\n\(.body // "Body not available")\n</body>\n</issue>\n" else "No issues are formally linked for closure by this PR." end')
-
-          # Assemble the final context block
-          PR_CONTEXT=$(cat <<EOF
-          Author: $author
-          Created At: $created_at
-          Base Branch: $base_branch
-          Head Branch: $head_branch
-          State: $state
-          Additions: $additions
-          Deletions: $deletions
-          Total Commits: $total_commits
-          Changed Files: $changed_files_count files
-
-          <pull_request_body>
-          $title
-          ---
-          $body
-          </pull_request_body>
-
-          <pull_request_comments>
-          $comments
-          </pull_request_comments>
-
-          <pull_request_reviews>
-          $reviews
-          </pull_request_reviews>
-
-          <pull_request_changed_files>
-          $changed_files_list
-          </pull_request_changed_files>
-
-          <linked_issues>
-          $linked_issues
-          </linked_issues>
-          EOF
-          )
-          # Export for the next step
-          { echo "PULL_REQUEST_CONTEXT<<EOF"; echo "$PR_CONTEXT"; echo "EOF"; } >> "$GITHUB_ENV"
+          # Define a unique, random delimiter for the main context block
+          CONTEXT_DELIMITER="GH_PR_CONTEXT_DELIMITER_$(openssl rand -hex 8)"
+          # Assemble the final context block directly into the environment file line by line
+          echo "PULL_REQUEST_CONTEXT<<$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
+          echo "Author: $author" >> "$GITHUB_ENV"
+          echo "Created At: $created_at" >> "$GITHUB_ENV"
+          echo "Base Branch: $base_branch" >> "$GITHUB_ENV"
+          echo "Head Branch: $head_branch" >> "$GITHUB_ENV"
+          echo "State: $state" >> "$GITHUB_ENV"
+          echo "Additions: $additions" >> "$GITHUB_ENV"
+          echo "Deletions: $deletions" >> "$GITHUB_ENV"
+          echo "Total Commits: $total_commits" >> "$GITHUB_ENV"
+          echo "Changed Files: $changed_files_count files" >> "$GITHUB_ENV"
+          echo "<pull_request_body>" >> "$GITHUB_ENV"
+          echo "$title" >> "$GITHUB_ENV"
+          echo "---" >> "$GITHUB_ENV"
+          echo "$body" >> "$GITHUB_ENV"
+          echo "</pull_request_body>" >> "$GITHUB_ENV"
+          echo "<pull_request_comments>" >> "$GITHUB_ENV"
+          echo "$comments" >> "$GITHUB_ENV"
+          echo "</pull_request_comments>" >> "$GITHUB_ENV"
+          echo "<pull_request_reviews>" >> "$GITHUB_ENV"
+          echo "$reviews" >> "$GITHUB_ENV"
+          echo "</pull_request_reviews>" >> "$GITHUB_ENV"
+          echo "<pull_request_changed_files>" >> "$GITHUB_ENV"
+          echo "$changed_files_list" >> "$GITHUB_ENV"
+          echo "</pull_request_changed_files>" >> "$GITHUB_ENV"
+          echo "<linked_issues>" >> "$GITHUB_ENV"
+          echo "$linked_issues" >> "$GITHUB_ENV"
+          echo "</linked_issues>" >> "$GITHUB_ENV"
+          echo "$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
           echo "PR_HEAD_SHA=$(echo "$pr_json" | jq -r .headRefOid)" >> $GITHUB_ENV
           echo "PR_AUTHOR=$author" >> $GITHUB_ENV
 
@@ -225,13 +218,13 @@ jobs:
           
           # [REVIEW GUIDELINES & CHECKLIST]
           Before writing any comments, you must first perform a thorough analysis based on these guidelines. This is your internal thought process—do not output it.
-          1.  **Identify the Author:** First, check if the PR author (`${{ env.PR_AUTHOR }}`) is one of your own identities (mirrobot, mirrobot-agent, mirrobot-agent[bot]). This check is crucial as it dictates your entire review style.
-          2.  **Assess PR Size and Complexity:** Internally estimate scale. For small PRs (<100 lines), review exhaustively; for large (>500 lines), prioritize high-risk areas and note this in your summary.
-          3.  **Assess the High-Level Approach:**
+          1. **Identify the Author:** First, check if the PR author (`${{ env.PR_AUTHOR }}`) is one of your own identities (mirrobot, mirrobot-agent, mirrobot-agent[bot]). This check is crucial as it dictates your entire review style.
+          2. **Assess PR Size and Complexity:** Internally estimate scale. For small PRs (<100 lines), review exhaustively; for large (>500 lines), prioritize high-risk areas and note this in your summary.
+          3. **Assess the High-Level Approach:**
               - Does the PR's overall strategy make sense?
               - Does it fit within the existing architecture? Is there a simpler way to achieve the goal?
               - Frame your feedback constructively. Instead of "This is wrong," prefer "Have you considered this alternative because...?"
-          3.  **Conduct a Detailed Code Analysis:** Evaluate all changes against the following criteria, cross-referencing existing discussion to skip duplicates:
+          3. **Conduct a Detailed Code Analysis:** Evaluate all changes against the following criteria, cross-referencing existing discussion to skip duplicates:
               - **Security:** Are there potential vulnerabilities (e.g., injection, improper error handling, dependency issues)?
               - **Performance:** Could any code introduce performance bottlenecks?
               - **Testing:** Are there sufficient tests for the new logic? If it's a bug fix, is there a regression test?
@@ -321,5 +314,5 @@ jobs:
           When using a heredoc (`<<'EOF'`), the closing delimiter (`EOF`) **must** be on a new line by itself, with no leading or trailing spaces, quotes, or other characters.
 
           Now, analyze the PR context and code. Then, generate the full sequence of commands starting with Step 1.
-          
+
           END_OF_PROMPT
