@@ -31,7 +31,9 @@ jobs:
         run: |
           # Common Info
           echo "NEW_COMMENT_AUTHOR=${{ github.event.comment.user.login }}" >> $GITHUB_ENV
-          { echo "NEW_COMMENT_BODY<<EOF"; echo "${{ github.event.comment.body }}"; echo "EOF"; } >> "$GITHUB_ENV"
+          # Use a unique delimiter for the comment body to be safe
+          DELIMITER_BODY="EOF_BODY_$(openssl rand -hex 8)"
+          { echo "NEW_COMMENT_BODY<<$DELIMITER_BODY"; echo "${{ github.event.comment.body }}"; echo "$DELIMITER_BODY"; } >> "$GITHUB_ENV"
 
           # Determine if PR or Issue
           if [ -n '${{ github.event.issue.pull_request }}' ]; then
@@ -41,8 +43,8 @@ jobs:
           fi
           echo "IS_PR=$IS_PR" >> $GITHUB_OUTPUT
 
-          # Define a unique delimiter to prevent user content from breaking the heredoc
-          DELIMITER="--_HEREDOC_DELIMITER_$(openssl rand -hex 8)_--"
+          # Define the main delimiter for the thread context
+          DELIMITER_CONTEXT="EOF_CONTEXT_$(openssl rand -hex 8)"
 
           # Fetch and Format Context based on type
           if [[ "$IS_PR" == "true" ]]; then
@@ -56,7 +58,7 @@ jobs:
             echo "PR_HEAD_SHA=$(echo "$pr_json" | jq -r .headRefOid)" >> $GITHUB_ENV
             echo "THREAD_AUTHOR=$(echo "$pr_json" | jq -r .author.login)" >> $GITHUB_ENV
 
-            # Prepare metadata
+            # Prepare all variables from JSON
             author=$(echo "$pr_json" | jq -r .author.login)
             created_at=$(echo "$pr_json" | jq -r .createdAt)
             base_branch=$(echo "$pr_json" | jq -r .baseRefName)
@@ -81,8 +83,10 @@ jobs:
             # Prepare linked issues
             linked_issues=$(echo "$pr_json" | jq -r 'if (.closingIssuesReferences.nodes | length) > 0 then .closingIssuesReferences.nodes[] | "<issue>\n <number>#\(.number)</number>\n <title>\(.title // "Title not available")</title>\n <body>\n\(.body // "Body not available")\n</body>\n</issue>\n" else "No issues are formally linked for closure by this PR." end')
 
-            # Stage 1: Assign to a variable using a robust, unique delimiter
-            THREAD_CONTEXT=$(cat <<$DELIMITER
+            # --- START: CORRECTED BLOCK ---
+            # Safely stream the context directly to GITHUB_ENV, avoiding command substitution.
+            echo "THREAD_CONTEXT<<$DELIMITER_CONTEXT" >> "$GITHUB_ENV"
+            cat <<EOF >> "$GITHUB_ENV"
             Type: Pull Request
             PR Number: #${{ env.THREAD_NUMBER }}
             Title: $title
@@ -115,10 +119,9 @@ jobs:
             <linked_issues>
             $linked_issues
             </linked_issues>
-            $DELIMITER
-            )
-            # Stage 2: Write the variable to GITHUB_ENV using the known-good compound command
-            { echo "THREAD_CONTEXT<<$DELIMITER"; echo "$THREAD_CONTEXT"; echo "$DELIMITER"; } >> "$GITHUB_ENV"
+            EOF
+            echo "$DELIMITER_CONTEXT" >> "$GITHUB_ENV"
+            # --- END: CORRECTED BLOCK ---
 
           else # It's an Issue
             issue_data=$(gh issue view ${{ env.THREAD_NUMBER }} --repo ${{ github.repository }} --json author,title,body,createdAt,state,comments)
@@ -139,8 +142,9 @@ jobs:
             references=$(echo "$timeline_data" | jq -r '.[] | select(.event == "cross-referenced") | .source.issue | "- Mentioned in \(.html_url | if contains("/pull/") then "PR" else "Issue" end): #\(.number) - \(.title)"')
             if [ -z "$references" ]; then references="No other issues or PRs have mentioned this thread."; fi
             
-            # Stage 1 for Issues
-            THREAD_CONTEXT=$(cat <<$DELIMITER
+            # Apply the same safe, direct-streaming pattern for Issues.
+            echo "THREAD_CONTEXT<<$DELIMITER_CONTEXT" >> "$GITHUB_ENV"
+            cat <<EOF >> "$GITHUB_ENV"
             Type: Issue
             Issue Number: #${{ env.THREAD_NUMBER }}
             Title: $title
@@ -159,10 +163,8 @@ jobs:
             <cross_references>
             $references
             </cross_references>
-            $DELIMITER
-            )
-            # Stage 2 for Issues
-            { echo "THREAD_CONTEXT<<$DELIMITER"; echo "$THREAD_CONTEXT"; echo "$DELIMITER"; } >> "$GITHUB_ENV"
+            EOF
+            echo "$DELIMITER_CONTEXT" >> "$GITHUB_ENV"
           fi
 
       - name: Checkout PR head
