@@ -161,7 +161,7 @@ jobs:
         run: |
           # Use a heredoc (<<'END_OF_PROMPT') to pass the prompt safely via stdin.
           # The "-" tells the opencode command to read the prompt from stdin.
-          opencode run --share -m opencode/big-pickle - <<'END_OF_PROMPT'
+          opencode run --share -m llm-proxy/${{ secrets.OPENCODE_MODEL }} - <<'END_OF_PROMPT'
           # [ROLE & OBJECTIVE]
           You are an expert AI software engineer specializing in bug triage and analysis. Your goal is to provide a comprehensive initial analysis of this new issue to help the maintainers. You will perform an investigation and report your findings directly on the GitHub issue.
 

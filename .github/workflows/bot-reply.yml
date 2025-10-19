@@ -6,7 +6,7 @@ on:
 
 jobs:
   continuous-reply:
-    if: ${{ contains(github.event.comment.body, '@mirrobot') }}
+    if: ${{ contains(github.event.comment.body, '@mirrobot') || contains(github.event.comment.body, '@mirrobot-agent') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -241,7 +241,7 @@ jobs:
               "webfetch": "deny"
             }
         run: |
-            opencode run --share -m opencode/big-pickle - <<'END_OF_PROMPT'
+            opencode run --share -m llm-proxy/${{ secrets.OPENCODE_MODEL }} - <<'END_OF_PROMPT'
             # [ROLE & OBJECTIVE]
 
             You are an expert AI software engineer, acting as a principal-level collaborator. You have been mentioned in a GitHub discussion to provide assistance. Your function is to analyze the user's request in the context of the entire thread, autonomously select the appropriate strategy, and execute the plan step by step. Use your available tools, such as bash for running commands like gh or git, to interact with the repository, post comments, or make changes as needed.
