@@ -41,11 +41,16 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.generate_token.outputs.token }}
         run: |
-          # Fetch all PR data, including new fields like files, commits, additions, etc.
+          # Fetch all PR data
           pr_json=$(gh pr view ${{ env.PR_NUMBER }} --repo ${{ github.repository }} --json author,title,body,createdAt,state,headRefName,baseRefName,headRefOid,additions,deletions,commits,files,comments,reviews,closingIssuesReferences)
-
+         
+          # Debug: Output pr_json for inspection
+          echo "$pr_json" > pr_json.txt
+          
           # For checkout step
-          echo "repo_full_name=$(echo "$pr_json" | jq -r .headRepository.nameWithOwner)" >> $GITHUB_OUTPUT
+          # Fallback to github.repository if headRepository is null
+          repo_full_name=$(echo "$pr_json" | jq -r '.headRepository.nameWithOwner // "${{ github.repository }}"')
+          echo "repo_full_name=$repo_full_name" >> $GITHUB_OUTPUT
           echo "ref_name=$(echo "$pr_json" | jq -r .headRefName)" >> $GITHUB_OUTPUT
 
           # Prepare metadata
