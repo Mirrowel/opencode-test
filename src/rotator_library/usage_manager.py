@@ -142,8 +142,11 @@ class UsageManager:
             tier1_keys, tier2_keys = [], []
             now = time.time()
             
-            # First, filter the list of available keys to exclude any on cooldown.
+            # Hold the data lock throughout the entire key selection and acquisition process
+            # to prevent race conditions where concurrent tasks can read the same cooldown state
+            # and select the same key that may actually be on cooldown.
             async with self._data_lock:
+                # First, filter the list of available keys to exclude any on cooldown.
                 for key in available_keys:
                     key_data = self._usage_data.get(key, {})
                     
@@ -162,26 +165,26 @@ class UsageManager:
                     elif model not in key_state["models_in_use"]:
                         tier2_keys.append((key, usage_count))
 
-            tier1_keys.sort(key=lambda x: x[1])
-            tier2_keys.sort(key=lambda x: x[1])
+                tier1_keys.sort(key=lambda x: x[1])
+                tier2_keys.sort(key=lambda x: x[1])
 
-            # Attempt to acquire a key from Tier 1 first.
-            for key, _ in tier1_keys:
-                state = self.key_states[key]
-                async with state["lock"]:
-                    if not state["models_in_use"]:
-                        state["models_in_use"].add(model)
-                        lib_logger.info(f"Acquired Tier 1 key ...{key[-4:]} for model {model}")
-                        return key
+                # Attempt to acquire a key from Tier 1 first.
+                for key, _ in tier1_keys:
+                    state = self.key_states[key]
+                    async with state["lock"]:
+                        if not state["models_in_use"]:
+                            state["models_in_use"].add(model)
+                            lib_logger.info(f"Acquired Tier 1 key ...{key[-4:]} for model {model}")
+                            return key
 
-            # If no Tier 1 keys are available, try Tier 2.
-            for key, _ in tier2_keys:
-                state = self.key_states[key]
-                async with state["lock"]:
-                    if model not in state["models_in_use"]:
-                        state["models_in_use"].add(model)
-                        lib_logger.info(f"Acquired Tier 2 key ...{key[-4:]} for model {model}")
-                        return key
+                # If no Tier 1 keys are available, try Tier 2.
+                for key, _ in tier2_keys:
+                    state = self.key_states[key]
+                    async with state["lock"]:
+                        if model not in state["models_in_use"]:
+                            state["models_in_use"].add(model)
+                            lib_logger.info(f"Acquired Tier 2 key ...{key[-4:]} for model {model}")
+                            return key
 
             # If all eligible keys are locked, wait for a key to be released.
             lib_logger.info("All eligible keys are currently locked for this model. Waiting...")
