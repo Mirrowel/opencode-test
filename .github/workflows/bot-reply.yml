@@ -32,17 +32,13 @@ jobs:
           echo "NEW_COMMENT_AUTHOR=${{ github.event.comment.user.login }}" >> $GITHUB_ENV
           { echo "NEW_COMMENT_BODY<<EOF"; echo "${{ github.event.comment.body }}"; echo "EOF"; } >> "$GITHUB_ENV"
 
-          # Use the reliable event payload to determine if the context is a PR
           if [ -n '${{ github.event.issue.pull_request }}' ]; then
             IS_PR="true"
           else
             IS_PR="false"
           fi
 
-          # --- FIX: Fetch Cross-References using the raw API, as this field isn't available in gh view commands ---
-          # This works for both issues and PRs by using their shared issue number.
           timeline_data=$(gh api "/repos/${{ github.repository }}/issues/${{ env.THREAD_NUMBER }}/timeline")
-          # The jq query parses the raw API response to find cross-reference events and formats them nicely.
           references=$(echo "$timeline_data" | jq -r '.[] | select(.event == "cross-referenced") | .source.issue | " - Mentioned in \(.html_url | if contains("/pull/") then "PR" else "Issue" end): #\(.number) - \(.title)"')
           {
             echo "CROSS_REFERENCES<<EOF"
@@ -57,18 +53,19 @@ jobs:
           if [[ "$IS_PR" == "true" ]]; then
             echo "THREAD_TYPE=Pull Request" >> $GITHUB_ENV
             echo "IS_PR=true" >> $GITHUB_OUTPUT
-            # 'timelineItems' has been removed from the next line to prevent errors
-            pr_data=$(gh pr view ${{ env.THREAD_NUMBER }} --json title,body,comments,reviews,headRefName,headRepository,headRefOid,closingIssuesReferences)
+            # FIX: Added --repo flag to make the command independent of the local checkout
+            pr_data=$(gh pr view ${{ env.THREAD_NUMBER }} --repo ${{ github.repository }} --json title,body,comments,reviews,headRefName,headRepository,headRefOid,closingIssuesReferences)
             echo "repo_full_name=$(echo "$pr_data" | jq -r .headRepository.nameWithOwner)" >> $GITHUB_OUTPUT
             echo "ref_name=$(echo "$pr_data" | jq -r .headRefName)" >> $GITHUB_OUTPUT
             echo "PR_HEAD_SHA=$(echo "$pr_data" | jq -r .headRefOid)" >> $GITHUB_ENV
             echo "THREAD_TITLE=$(echo "$pr_data" | jq -r .title)" >> $GITHUB_ENV
-            { echo "THREAD_BODY<<EOF"; echo "$pr_data" | jq -r .body; echo "EOF"; } >> $GITHUB_ENV
+            { echo "THREAD_BODY<<EOF"; echo "$pr_data" | jq -r .body; echo "EOF"; } >> "$GITHUB_ENV"
             {
               echo "LINKED_ISSUES_CONTEXT<<EOF"
               issue_numbers=$(echo "$pr_data" | jq -r '.closingIssuesReferences[].number')
               if [ -n "$issue_numbers" ]; then
                 for num in $issue_numbers; do
+                  # This command already correctly used the --repo flag
                   issue_details=$(gh issue view "$num" --repo ${{ github.repository }} --json number,title,body)
                   echo "$issue_details" | jq -r '"<issue>\n <number>#\(.number)</number>\n <title>\(.title // "Title not available")</title>\n <body>\n\(.body // "Body not available")\n</body>\n</issue>\n"'
                 done
@@ -95,10 +92,10 @@ jobs:
           else
             echo "THREAD_TYPE=Issue" >> $GITHUB_ENV
             echo "IS_PR=false" >> $GITHUB_OUTPUT
-            # 'timelineItems' has been removed from the next line to prevent errors
-            issue_data=$(gh issue view ${{ env.THREAD_NUMBER }} --json title,body,comments)
+            # FIX: Added --repo flag to make the command independent of the local checkout
+            issue_data=$(gh issue view ${{ env.THREAD_NUMBER }} --repo ${{ github.repository }} --json title,body,comments)
             echo "THREAD_TITLE=$(echo "$issue_data" | jq -r .title)" >> $GITHUB_ENV
-            { echo "THREAD_BODY<<EOF"; echo "$issue_data" | jq -r .body; echo "EOF"; } >> $GITHUB_ENV
+            { echo "THREAD_BODY<<EOF"; echo "$issue_data" | jq -r .body; echo "EOF"; } >> "$GITHUB_ENV"
             {
               echo "THREAD_HISTORY<<EOF"
               if [ "$(echo "$issue_data" | jq '.comments | length')" -gt 0 ]; then
