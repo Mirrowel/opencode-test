@@ -11,11 +11,23 @@ class CooldownManager:
     def __init__(self):
         self._cooldowns: Dict[str, float] = {}
         self._lock = asyncio.Lock()
+        self._global_lock = asyncio.Lock()
 
     async def is_cooling_down(self, provider: str) -> bool:
         """Checks if a provider is currently in a cooldown period."""
         async with self._lock:
             return provider in self._cooldowns and time.time() < self._cooldowns[provider]
+
+    async def check_and_start_cooldown(self, provider: str, duration: int) -> bool:
+        """
+        Atomically checks if provider is cooling down and starts cooldown if not.
+        Returns True if cooldown was started, False if already cooling down.
+        """
+        async with self._global_lock:
+            if await self.is_cooling_down(provider):
+                return False
+            await self.start_cooldown(provider, duration)
+            return True
 
     async def start_cooldown(self, provider: str, duration: int):
         """
