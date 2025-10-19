@@ -49,11 +49,14 @@ jobs:
             pr_json=$(gh pr view ${{ env.THREAD_NUMBER }} --repo ${{ github.repository }} --json author,title,body,createdAt,state,headRefName,baseRefName,headRefOid,additions,deletions,commits,files,comments,reviews,closingIssuesReferences)
             # Fetch review comments separately
             review_comments_json=$(gh api "/repos/${{ github.repository }}/pulls/${{ env.THREAD_NUMBER }}/comments")
-            
+
             # Debug: Output pr_json and review_comments_json for inspection
             echo "$pr_json" > pr_json.txt
             echo "$review_comments_json" > review_comments_json.txt
-            
+
+            # Fetch timeline data to find cross-references
+            timeline_data=$(gh api "/repos/${{ github.repository }}/issues/${{ env.THREAD_NUMBER }}/timeline")
+
             # For checkout step
             echo "repo_full_name=$(echo "$pr_json" | jq -r '.headRepository.nameWithOwner // "${{ github.repository }}"')" >> $GITHUB_OUTPUT
             echo "ref_name=$(echo "$pr_json" | jq -r .headRefName)" >> $GITHUB_OUTPUT
@@ -95,20 +98,14 @@ jobs:
                 
                 issue_title=$(echo "$issue_details_json" | jq -r '.title // "Title not available"')
                 issue_body=$(echo "$issue_details_json" | jq -r '.body // "Body not available"')
-                
-                linked_issues_content+=$(cat <<EOF
-                <issue>
-                <number>#${number}</number>
-                <title>${issue_title}</title>
-                <body>
-                ${issue_body}
-                </body>
-                </issue>
-                EOF
-                )
+                linked_issues_content+=$(printf "<issue>\n <number>#%s</number>\n <title>%s</title>\n <body>\n%s\n</body>\n</issue>\n" "$number" "$issue_title" "$issue_body")
               done
               linked_issues=$linked_issues_content
             fi
+
+            # Prepare cross-references from timeline data
+            references=$(echo "$timeline_data" | jq -r '.[] | select(.event == "cross-referenced") | .source.issue | "- Mentioned in \(.html_url | if contains("/pull/") then "PR" else "Issue" end): #\(.number) - \(.title)"')
+            if [ -z "$references" ]; then references="This PR has not been mentioned in other issues or PRs."; fi
             
             # Step 1: Write the header for the multi-line environment variable
             echo "THREAD_CONTEXT<<$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
@@ -143,7 +140,13 @@ jobs:
             echo "<linked_issues>" >> "$GITHUB_ENV"
             echo "$linked_issues" >> "$GITHUB_ENV"
             echo "</linked_issues>" >> "$GITHUB_ENV"
+
             # Step 3: Write the closing delimiter
+            # Add cross-references to the final context
+            echo "<cross_references>" >> "$GITHUB_ENV"
+            echo "$references" >> "$GITHUB_ENV"
+            echo "</cross_references>" >> "$GITHUB_ENV"
+
             echo "$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
           else # It's an Issue
             issue_data=$(gh issue view ${{ env.THREAD_NUMBER }} --repo ${{ github.repository }} --json author,title,body,createdAt,state,comments)
