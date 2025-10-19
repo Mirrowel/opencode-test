@@ -32,20 +32,33 @@ jobs:
           echo "NEW_COMMENT_AUTHOR=${{ github.event.comment.user.login }}" >> $GITHUB_ENV
           { echo "NEW_COMMENT_BODY<<EOF"; echo "${{ github.event.comment.body }}"; echo "EOF"; } >> "$GITHUB_ENV"
 
-          # --- FIX: Use the event payload to determine if the context is a PR ---
-          # This is more reliable than the gh issue view command that was causing the error.
-          # It checks if the 'pull_request' key exists in the event's issue context.
+          # Use the reliable event payload to determine if the context is a PR
           if [ -n '${{ github.event.issue.pull_request }}' ]; then
             IS_PR="true"
           else
             IS_PR="false"
           fi
-          # --- END FIX ---
+
+          # --- FIX: Fetch Cross-References using the raw API, as this field isn't available in gh view commands ---
+          # This works for both issues and PRs by using their shared issue number.
+          timeline_data=$(gh api "/repos/${{ github.repository }}/issues/${{ env.THREAD_NUMBER }}/timeline")
+          # The jq query parses the raw API response to find cross-reference events and formats them nicely.
+          references=$(echo "$timeline_data" | jq -r '.[] | select(.event == "cross-referenced") | .source.issue | " - Mentioned in \(.html_url | if contains("/pull/") then "PR" else "Issue" end): #\(.number) - \(.title)"')
+          {
+            echo "CROSS_REFERENCES<<EOF"
+            if [ -n "$references" ]; then
+              echo "$references"
+            else
+              echo "No other issues or PRs have mentioned this thread."
+            fi
+            echo "EOF"
+          } >> "$GITHUB_ENV"
 
           if [[ "$IS_PR" == "true" ]]; then
             echo "THREAD_TYPE=Pull Request" >> $GITHUB_ENV
             echo "IS_PR=true" >> $GITHUB_OUTPUT
-            pr_data=$(gh pr view ${{ env.THREAD_NUMBER }} --json title,body,comments,reviews,headRefName,headRepository,headRefOid,closingIssuesReferences,timelineItems)
+            # 'timelineItems' has been removed from the next line to prevent errors
+            pr_data=$(gh pr view ${{ env.THREAD_NUMBER }} --json title,body,comments,reviews,headRefName,headRepository,headRefOid,closingIssuesReferences)
             echo "repo_full_name=$(echo "$pr_data" | jq -r .headRepository.nameWithOwner)" >> $GITHUB_OUTPUT
             echo "ref_name=$(echo "$pr_data" | jq -r .headRefName)" >> $GITHUB_OUTPUT
             echo "PR_HEAD_SHA=$(echo "$pr_data" | jq -r .headRefOid)" >> $GITHUB_ENV
@@ -61,16 +74,6 @@ jobs:
                 done
               else
                 echo "No issues are formally linked for closure by this PR."
-              fi
-              echo "EOF"
-            } >> "$GITHUB_ENV"
-            {
-              echo "CROSS_REFERENCES<<EOF"
-              references=$(echo "$pr_data" | jq -r '.timelineItems[] | select(.__typename == "CrossReferenceEvent") | " - Mentioned in \(.source.__typename | sub("PullRequest"; "PR")): #\(.source.number) - \(.source.title)"')
-              if [ -n "$references" ]; then
-                echo "$references"
-              else
-                echo "No other issues or PRs have mentioned this thread."
               fi
               echo "EOF"
             } >> "$GITHUB_ENV"
@@ -92,19 +95,10 @@ jobs:
           else
             echo "THREAD_TYPE=Issue" >> $GITHUB_ENV
             echo "IS_PR=false" >> $GITHUB_OUTPUT
-            issue_data=$(gh issue view ${{ env.THREAD_NUMBER }} --json title,body,comments,timelineItems)
+            # 'timelineItems' has been removed from the next line to prevent errors
+            issue_data=$(gh issue view ${{ env.THREAD_NUMBER }} --json title,body,comments)
             echo "THREAD_TITLE=$(echo "$issue_data" | jq -r .title)" >> $GITHUB_ENV
-            { echo "THREAD_BODY<<EOF"; echo "$issue_data" | jq -r .body; echo "EOF"; } >> "$GITHUB_ENV"
-            {
-              echo "CROSS_REFERENCES<<EOF"
-              references=$(echo "$issue_data" | jq -r '.timelineItems[] | select(.__typename == "CrossReferenceEvent") | " - Mentioned in \(.source.__typename | sub("PullRequest"; "PR")): #\(.source.number) - \(.source.title)"')
-              if [ -n "$references" ]; then
-                echo "$references"
-              else
-                echo "No other issues or PRs have mentioned this thread."
-              fi
-              echo "EOF"
-            } >> "$GITHUB_ENV"
+            { echo "THREAD_BODY<<EOF"; echo "$issue_data" | jq -r .body; echo "EOF"; } >> $GITHUB_ENV
             {
               echo "THREAD_HISTORY<<EOF"
               if [ "$(echo "$issue_data" | jq '.comments | length')" -gt 0 ]; then
