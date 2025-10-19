@@ -72,11 +72,10 @@ jobs:
             body=$(echo "$pr_json" | jq -r .body)
             # Prepare changed files list
             changed_files_list=$(echo "$pr_json" | jq -r '.files[] | "- \(.path) (MODIFIED) +\((.additions))/-((.deletions))"')
-            # Prepare comments
+            # Prepare comments (general PR comments)
             comments=$(echo "$pr_json" | jq -r 'if (.comments | length) > 0 then .comments[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n\(.body // "")\n" else "No general comments." end')
-            # Prepare reviews
-            reviews=$(echo "$pr_json" | jq -r 'if (.reviews | length) > 0 then .reviews[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n - Review body: \(.body // "No summary comment.")\n" + (if .comments | length > 0 then " - Comments:\n" + (.comments[] | " - \(.path):\(.line): \(.body // "")\n") else "" end) else "No formal reviews." end')
-
+            # Prepare reviews (only formal reviews with body or inline comments)
+            reviews=$(echo "$pr_json" | jq -r 'if (.reviews | length) > 0 then (.reviews[] | select(.body != null or (.comments | length > 0)) | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n - Review body: \(.body // "No summary comment.")\n" + (if .comments | length > 0 then " - Inline Comments:\n" + (.comments[] | " - \(.path):\(.line // "N/A"):\n   \(.body // "")\n") else "" end)) else "No formal reviews." end')
             # Prepare linked issues
             linked_issues=$(echo "$pr_json" | jq -r 'if (.closingIssuesReferences | length) > 0 then .closingIssuesReferences[] | "<issue>\n <number>#\(.number)</number>\n <title>\(.title // "Title not available")</title>\n <body>\n\(.body // "Body not available")\n</body>\n</issue>\n" else "No issues are formally linked for closure by this PR." end')
             # Step 1: Write the header for the multi-line environment variable
@@ -123,11 +122,11 @@ jobs:
             body=$(echo "$issue_data" | jq -r .body)
             # Prepare comments
             comments=$(echo "$issue_data" | jq -r 'if (.comments | length) > 0 then .comments[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n\(.body // "")\n" else "No comments have been posted yet." end')
-           
+
             # Prepare cross-references
             references=$(echo "$timeline_data" | jq -r '.[] | select(.event == "cross-referenced") | .source.issue | "- Mentioned in \(.html_url | if contains("/pull/") then "PR" else "Issue" end): #\(.number) - \(.title)"')
             if [ -z "$references" ]; then references="No other issues or PRs have mentioned this thread."; fi
-           
+
             # Step 1: Write the header
             echo "THREAD_CONTEXT<<$CONTEXT_DELIMITER" >> "$GITHUB_ENV"
             # Step 2: Append the content line by line
