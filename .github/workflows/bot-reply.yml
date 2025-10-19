@@ -78,8 +78,10 @@ jobs:
             # Prepare linked issues
             linked_issues=$(echo "$pr_json" | jq -r 'if (.closingIssuesReferences.nodes | length) > 0 then .closingIssuesReferences.nodes[] | "<issue>\n <number>#\(.number)</number>\n <title>\(.title // "Title not available")</title>\n <body>\n\(.body // "Body not available")\n</body>\n</issue>\n" else "No issues are formally linked for closure by this PR." end')
 
-            # Assemble the final context block
-            THREAD_CONTEXT=$(cat <<EOF
+            # Assemble the final context block. Stream directly to the environment file to avoid shell parsing issues
+            {
+              echo "THREAD_CONTEXT<<EOF"
+              cat <<EOF
             Type: Pull Request
             PR Number: #${{ env.THREAD_NUMBER }}
             Title: $title
@@ -113,8 +115,8 @@ jobs:
             $linked_issues
             </linked_issues>
             EOF
-            )
-            { echo "THREAD_CONTEXT<<EOF"; echo "$THREAD_CONTEXT"; echo "EOF"; } >> "$GITHUB_ENV"
+              echo "EOF"
+            } >> "$GITHUB_ENV"
 
           else # It's an Issue
             issue_data=$(gh issue view ${{ env.THREAD_NUMBER }} --repo ${{ github.repository }} --json author,title,body,createdAt,state,comments)
@@ -135,8 +137,10 @@ jobs:
             references=$(echo "$timeline_data" | jq -r '.[] | select(.event == "cross-referenced") | .source.issue | "- Mentioned in \(.html_url | if contains("/pull/") then "PR" else "Issue" end): #\(.number) - \(.title)"')
             if [ -z "$references" ]; then references="No other issues or PRs have mentioned this thread."; fi
 
-            # Assemble final Issue context block
-            THREAD_CONTEXT=$(cat <<EOF
+            # Assemble final Issue context block. Stream directly to the environment file here as well
+            {
+              echo "THREAD_CONTEXT<<EOF"
+              cat <<EOF
             Type: Issue
             Issue Number: #${{ env.THREAD_NUMBER }}
             Title: $title
@@ -156,8 +160,8 @@ jobs:
             $references
             </cross_references>
             EOF
-            )
-            { echo "THREAD_CONTEXT<<EOF"; echo "$THREAD_CONTEXT"; echo "EOF"; } >> "$GITHUB_ENV"
+              echo "EOF"
+            } >> "$GITHUB_ENV"
           fi
 
       - name: Checkout PR head
