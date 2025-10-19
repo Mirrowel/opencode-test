@@ -63,9 +63,11 @@ class UsageManager:
         """Saves the current usage data to the JSON file asynchronously."""
         if self._usage_data is None:
             return
+        # Create a deep copy to prevent race conditions during save
         async with self._data_lock:
+            usage_data_copy = json.loads(json.dumps(self._usage_data))
             async with aiofiles.open(self.file_path, 'w') as f:
-                await f.write(json.dumps(self._usage_data, indent=2))
+                await f.write(json.dumps(usage_data_copy, indent=2))
 
     async def _reset_daily_stats_if_needed(self):
         """Checks if daily stats need to be reset for any key."""
@@ -131,7 +133,7 @@ class UsageManager:
     async def acquire_key(self, available_keys: List[str], model: str, deadline: float) -> str:
         """
         Acquires the best available key using a tiered, model-aware locking strategy,
-        respecting a global deadline.
+        respecting a global deadline. Uses atomic operations to prevent race conditions.
         """
         await self._lazy_init()
         await self._reset_daily_stats_if_needed()
@@ -143,7 +145,11 @@ class UsageManager:
             now = time.time()
             
             # First, filter the list of available keys to exclude any on cooldown.
+            # Use a global lock to prevent race conditions during cooldown checking
             async with self._data_lock:
+                if self._usage_data is None:
+                    continue
+                    
                 for key in available_keys:
                     key_data = self._usage_data.get(key, {})
                     
@@ -165,19 +171,21 @@ class UsageManager:
             tier1_keys.sort(key=lambda x: x[1])
             tier2_keys.sort(key=lambda x: x[1])
 
-            # Attempt to acquire a key from Tier 1 first.
+            # Attempt to acquire a key from Tier 1 first with atomic per-key locking
             for key, _ in tier1_keys:
                 state = self.key_states[key]
                 async with state["lock"]:
+                    # Double-check the state after acquiring the lock to prevent race conditions
                     if not state["models_in_use"]:
                         state["models_in_use"].add(model)
                         lib_logger.info(f"Acquired Tier 1 key ...{key[-4:]} for model {model}")
                         return key
 
-            # If no Tier 1 keys are available, try Tier 2.
+            # If no Tier 1 keys are available, try Tier 2 with atomic per-key locking
             for key, _ in tier2_keys:
                 state = self.key_states[key]
                 async with state["lock"]:
+                    # Double-check the state after acquiring the lock to prevent race conditions
                     if model not in state["models_in_use"]:
                         state["models_in_use"].add(model)
                         lib_logger.info(f"Acquired Tier 2 key ...{key[-4:]} for model {model}")
@@ -229,13 +237,16 @@ class UsageManager:
         async with state["condition"]:
             state["condition"].notify_all()
 
-    async def record_success(self, key: str, model: str, completion_response: Optional[litellm.ModelResponse] = None):
+    async def record_success(self, key: str, model: str, completion_response: Optional[Any] = None):
         """
         Records a successful API call, resetting failure counters.
         It safely handles cases where token usage data is not available.
         """
         await self._lazy_init()
         async with self._data_lock:
+            if self._usage_data is None:
+                return
+                
             today_utc_str = datetime.now(timezone.utc).date().isoformat()
             key_data = self._usage_data.setdefault(key, {"daily": {"date": today_utc_str, "models": {}}, "global": {"models": {}}, "model_cooldowns": {}, "failures": {}})
             
@@ -259,11 +270,14 @@ class UsageManager:
                 daily_model_data["completion_tokens"] += getattr(usage, 'completion_tokens', 0) # Not present in embedding responses
                 lib_logger.info(f"Recorded usage from final stream object for key ...{key[-4:]}")
                 try:
-                    # Differentiate cost calculation based on response type
-                    if isinstance(completion_response, litellm.EmbeddingResponse):
-                        cost = litellm.embedding_cost(embedding_response=completion_response)
-                    else:
-                        cost = litellm.completion_cost(completion_response=completion_response)
+                    # Try to calculate cost using available litellm functions
+                    cost = None
+                    if hasattr(completion_response, '__class__'):
+                        class_name = str(completion_response.__class__)
+                        if 'Embedding' in class_name and hasattr(litellm, 'embedding_cost'):
+                            cost = getattr(litellm, 'embedding_cost')(embedding_response=completion_response)
+                        elif hasattr(litellm, 'completion_cost'):
+                            cost = getattr(litellm, 'completion_cost')(completion_response=completion_response)
                     
                     if cost is not None:
                         daily_model_data["approx_cost"] += cost
@@ -280,6 +294,9 @@ class UsageManager:
         """Records a failure and applies cooldowns based on an escalating backoff strategy."""
         await self._lazy_init()
         async with self._data_lock:
+            if self._usage_data is None:
+                return
+                
             today_utc_str = datetime.now(timezone.utc).date().isoformat()
             key_data = self._usage_data.setdefault(key, {"daily": {"date": today_utc_str, "models": {}}, "global": {"models": {}}, "model_cooldowns": {}, "failures": {}})
             
