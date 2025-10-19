@@ -391,5 +391,9 @@ jobs:
             ```
             If creating a new PR (e.g., for an issue), use `gh pr create` internally and post the link in the issue thread with a similar summary. Edit initial posts for updates.
             ---
+            
+            # [TOOLS NOTE]
+            gh/git commands should be run using bash. Gh is not a tool by itself - it is a tool to be used within a bash environment. If a GH command cannot achieve the desired effect, use curl with the GitHub API as a fallback.
+
             Now, based on the user's request, context, and history, analyze the situation, select the appropriate strategy or strategies, and proceed step by step to fulfill the mission using your tools and the expected commands as guides. Always incorporate communication to keep the user informed via GitHub comments, ensuring only relevant, useful info is shared.
             EOF
