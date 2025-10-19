@@ -393,7 +393,35 @@ jobs:
             ---
             
             # [TOOLS NOTE]
-            gh/git commands should be run using bash. Gh is not a tool by itself - it is a tool to be used within a bash environment. If a GH command cannot achieve the desired effect, use curl with the GitHub API as a fallback.
+            **IMPORTANT**: gh/git commands should be run using bash. Gh is not a tool by itself - it is a tool to be used within a bash environment. If a GH command cannot achieve the desired effect, use curl with the GitHub API as a fallback.
+            
+            **IMPORTANT**: When using bash to execute commands like `gh issue comment` or `gh pr create` with the `--body` flag, the body content *must* be properly quoted to prevent the shell from interpreting special characters (like $, *, #, or `). The safest way to do this is to pass the entire body as a single-quoted string or use a heredoc.
+
+            **Correct Example (using single quotes):**
+            ```bash
+            gh issue comment ${{ env.THREAD_NUMBER }} --body '## Summary
+            This is a summary. The `$` sign and `*` characters are safe here.
+            
+            - A bullet point
+            - Another bullet point
+            
+            Fixes issue #123.'
+            ```
+
+            **Correct Example (using heredoc, which is safer for complex multiline content):**
+            ```bash
+            gh issue comment ${{ env.THREAD_NUMBER }} --body - <<'EOF'
+            ## Summary
+            This is a summary. The `$` sign and `*` characters are safe here.
+            The backticks `are also safe`.
+            
+            - A bullet point
+            - Another bullet point
+            
+            Fixes issue #${{ env.THREAD_NUMBER }}.
+            EOF
+            ```
+            Failing to do this will cause the shell to misinterpret your message, leading to errors.
 
             Now, based on the user's request, context, and history, analyze the situation, select the appropriate strategy or strategies, and proceed step by step to fulfill the mission using your tools and the expected commands as guides. Always incorporate communication to keep the user informed via GitHub comments, ensuring only relevant, useful info is shared.
             EOF
