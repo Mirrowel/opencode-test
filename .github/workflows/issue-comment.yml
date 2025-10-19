@@ -237,6 +237,8 @@ jobs:
 
           # [TOOLS NOTE]
           When using `bash` to execute `gh issue comment` with multi-line content from stdin, you MUST use the `-F -` flag with a heredoc (`<<'EOF'`). This correctly pipes the content to the command.
+          
+          When using a heredoc (`<<'EOF'`), the closing delimiter (`EOF`) **must** be on a new line by itself, with no leading or trailing spaces, quotes, or other characters.
 
           Now, execute the plan. Start with Step 1.
           END_OF_PROMPT
