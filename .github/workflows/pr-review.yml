@@ -36,7 +36,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.generate_token.outputs.token }}
         run: |
-          pr_json=$(gh pr view ${{ env.PR_NUMBER }} --json headRefName,headRepository,title,body,headRefOid,comments,reviews,closingIssuesReferences)
+          pr_json=$(gh pr view ${{ env.PR_NUMBER }} --repo ${{ github.repository }} --json headRefName,headRepository,title,body,headRefOid,comments,reviews,closingIssuesReferences)
           
           # Set outputs for the checkout step
           echo "repo_full_name=$(echo "$pr_json" | jq -r .headRepository.nameWithOwner)" >> $GITHUB_OUTPUT
