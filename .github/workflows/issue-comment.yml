@@ -108,6 +108,10 @@ jobs:
           issue_data=$(gh issue view ${{ env.ISSUE_NUMBER }} --json author,title,body,createdAt,state,comments)
           timeline_data=$(gh api "/repos/${{ github.repository }}/issues/${{ env.ISSUE_NUMBER }}/timeline")
 
+          # Debug: Output issue_data and timeline_data for inspection
+          echo "$issue_data" > issue_data.txt
+          echo "$timeline_data" > timeline_data.txt
+          
           # Prepare metadata
           author=$(echo "$issue_data" | jq -r .author.login)
           created_at=$(echo "$issue_data" | jq -r .createdAt)
@@ -117,7 +121,7 @@ jobs:
 
           # Prepare comments
           comments=$(echo "$issue_data" | jq -r 'if (.comments | length) > 0 then .comments[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n\(.body // "")\n" else "No comments have been posted yet." end')
-          
+
           # Prepare cross-references
           references=$(echo "$timeline_data" | jq -r '.[] | select(.event == "cross-referenced") | .source.issue | "- Mentioned in \(.html_url | if contains("/pull/") then "PR" else "Issue" end): #\(.number) - \(.title)"')
           if [ -z "$references" ]; then

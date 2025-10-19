@@ -43,9 +43,12 @@ jobs:
         run: |
           # Fetch all PR data
           pr_json=$(gh pr view ${{ env.PR_NUMBER }} --repo ${{ github.repository }} --json author,title,body,createdAt,state,headRefName,baseRefName,headRefOid,additions,deletions,commits,files,comments,reviews,closingIssuesReferences)
-         
-          # Debug: Output pr_json for inspection
+          # Fetch review comments separately
+          review_comments_json=$(gh api "/repos/${{ github.repository }}/pulls/${{ env.PR_NUMBER }}/comments")
+          
+          # Debug: Output pr_json and review_comments_json for inspection
           echo "$pr_json" > pr_json.txt
+          echo "$review_comments_json" > review_comments_json.txt
           
           # For checkout step
           # Fallback to github.repository if headRepository is null
@@ -69,14 +72,18 @@ jobs:
           # Prepare changed files list
           changed_files_list=$(echo "$pr_json" | jq -r '.files[] | "- \(.path) (MODIFIED) +\((.additions))/-((.deletions))"')
 
-          # Prepare comments
+          # Prepare general PR comments
           comments=$(echo "$pr_json" | jq -r 'if (.comments | length) > 0 then .comments[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n\(.body // "")\n" else "No general comments." end')
 
-          # Prepare reviews (more complex formatting)
-          reviews=$(echo "$pr_json" | jq -r 'if (.reviews | length) > 0 then .reviews[] | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n - Review body: \(.body // "No summary comment.")\n" + (if .comments | length > 0 then " - Comments:\n" + (.comments.nodes[] | " - \(.path):\(.line): \(.body // "")\n") else "" end) else "No formal reviews." end')
+          # Prepare reviews (only include reviews with a non-empty body or non-COMMENTED state, exclude ellipsis-dev)
+          reviews=$(echo "$pr_json" | jq -r 'if (.reviews | length) > 0 then (.reviews[] | select(.author.login != "ellipsis-dev" and .body != null and .state != "COMMENTED") | "- \(.author.login // "unknown") at \(.createdAt // "N/A"):\n - Review body: \(.body // "No summary comment.")\n - State: \(.state // "UNKNOWN")\n") else "No formal reviews." end')
+
+          # Prepare review comments (group by pull_request_review_id, exclude ellipsis-dev)
+          review_comments=$(echo "$review_comments_json" | jq -r 'if (length > 0) then (.[] | select(.user.login != "ellipsis-dev") | .pull_request_review_id as $review_id | "- \(.user.login // "unknown") (Review ID: \($review_id // "N/A")) at \(.created_at // "N/A"):\n - Inline Comment: \(.path):\(.line // "N/A"):\n   \(.body // "")\n") else "No inline review comments." end')
 
           # Prepare linked issues
           linked_issues=$(echo "$pr_json" | jq -r 'if (.closingIssuesReferences | length) > 0 then .closingIssuesReferences[] | "<issue>\n <number>#\(.number)</number>\n <title>\(.title // "Title not available")</title>\n <body>\n\(.body // "Body not available")\n</body>\n</issue>\n" else "No issues are formally linked for closure by this PR." end')
+
           # Define a unique, random delimiter for the main context block
           CONTEXT_DELIMITER="GH_PR_CONTEXT_DELIMITER_$(openssl rand -hex 8)"
           # Assemble the final context block directly into the environment file line by line
@@ -101,6 +108,9 @@ jobs:
           echo "<pull_request_reviews>" >> "$GITHUB_ENV"
           echo "$reviews" >> "$GITHUB_ENV"
           echo "</pull_request_reviews>" >> "$GITHUB_ENV"
+          echo "<pull_request_review_comments>" >> "$GITHUB_ENV"
+          echo "$review_comments" >> "$GITHUB_ENV"
+          echo "</pull_request_review_comments>" >> "$GITHUB_ENV"
           echo "<pull_request_changed_files>" >> "$GITHUB_ENV"
           echo "$changed_files_list" >> "$GITHUB_ENV"
           echo "</pull_request_changed_files>" >> "$GITHUB_ENV"
@@ -257,7 +267,7 @@ jobs:
           ```
 
           **Step 2: Add Line-Specific Comments (As Needed)**
-          For each specific piece of feedback, execute this command. Internally verify file paths and line numbers before generating the command. Use suggestion blocks (```suggestion\n...```) for code fixes.
+          For each specific piece of feedback, execute this command. Internally verify file paths and line numbers before generating the command. Use suggestion blocks (```suggestion
           If it's your own code, apply the humorous tone.
           ```bash
           # Example for one line comment. Repeat for each point of feedback.
@@ -272,7 +282,7 @@ jobs:
             -f side=RIGHT
           ```
 
-          **Step 3: Post the Final Summary Comment**
+          **Step 3: Post the Final Final Summary Comment**
           After posting ALL line-specific comments, you MUST execute this command exactly once to provide a holistic overview. **Use the appropriate template below based on the author.**
 
           **Template for reviewing OTHERS' code:**
